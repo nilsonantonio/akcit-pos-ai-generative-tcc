@@ -24,16 +24,31 @@ O projeto implementa o plano operacional atualizado:
 
 ## Fluxo recomendado
 
-1. Prepare os metadados do `Common Voice PT`:
+1. Aceite os termos do dataset no site do Mozilla Data Collective e exporte o token:
+
+```bash
+export MOZILLA_DATA_COLLECTIVE_API_KEY="seu_token_aqui"
+```
+
+2. Baixe e organize o `Common Voice PT` no layout canonico do repo:
+
+```bash
+python3 scripts/download_common_voice_pt.py \
+  --out-dir data/raw/common_voice_pt
+```
+
+3. Prepare os metadados do subconjunto `pt-BR`:
 
 ```bash
 python3 scripts/prepare_common_voice_metadata.py \
-  --tsv /caminho/para/common_voice/validated.tsv \
-  --clips-dir /caminho/para/common_voice/clips \
+  --tsv data/raw/common_voice_pt/validated.tsv \
+  --clips-dir data/raw/common_voice_pt/clips \
+  --locale pt \
+  --variant pt-BR \
   --out data/manifests/common_voice_metadata.csv
 ```
 
-2. Converta o audio para WAV mono e calcule duracoes:
+4. Converta o audio para WAV mono e calcule duracoes:
 
 ```bash
 python3 scripts/preprocess_audio_dataset.py \
@@ -42,7 +57,7 @@ python3 scripts/preprocess_audio_dataset.py \
   --out-metadata data/manifests/common_voice_curated.csv
 ```
 
-3. Gere o manifesto real a partir do subset curado de Common Voice.
+5. Gere o manifesto real a partir do subset curado de Common Voice.
 
 ```bash
 python3 scripts/select_speakers.py \
@@ -51,7 +66,7 @@ python3 scripts/select_speakers.py \
   --speaker-selection-out data/manifests/speaker_selection.csv
 ```
 
-4. Valide o manifesto:
+6. Valide o manifesto:
 
 ```bash
 python3 scripts/validate_manifest.py \
@@ -59,7 +74,7 @@ python3 scripts/validate_manifest.py \
   --prompts data/prompts/ptbr_test_prompts.csv
 ```
 
-5. Gere embeddings de speaker:
+7. Gere embeddings de speaker:
 
 ```bash
 python3 scripts/extract_speaker_embeddings.py \
@@ -68,7 +83,7 @@ python3 scripts/extract_speaker_embeddings.py \
   --out-dir artifacts/embeddings
 ```
 
-6. Gere a matriz de execucao:
+8. Gere a matriz de execucao:
 
 ```bash
 python3 scripts/generate_run_matrix.py \
@@ -76,7 +91,7 @@ python3 scripts/generate_run_matrix.py \
   --out artifacts/run_matrix.csv
 ```
 
-7. Inicialize o ledger de amostras:
+9. Inicialize o ledger de amostras:
 
 ```bash
 python3 scripts/init_samples.py \
@@ -86,7 +101,7 @@ python3 scripts/init_samples.py \
   --out artifacts/evaluation/samples.csv
 ```
 
-8. Rode os modelos:
+10. Rode os modelos:
 
 ```bash
 python3 scripts/run_speecht5_zero_shot.py \
@@ -118,7 +133,7 @@ python3 scripts/run_parler_reference.py \
   --samples artifacts/evaluation/samples.csv
 ```
 
-9. Rode Whisper e calcule WER:
+11. Rode Whisper e calcule WER:
 
 ```bash
 python3 scripts/run_whisper_batch.py \
@@ -132,7 +147,7 @@ python3 scripts/compute_wer.py \
   --out artifacts/evaluation/samples.csv
 ```
 
-10. Calcule as demais metricas:
+12. Calcule as demais metricas:
 
 ```bash
 python3 scripts/compute_speaker_similarity.py \

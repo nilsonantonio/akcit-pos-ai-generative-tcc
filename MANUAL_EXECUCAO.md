@@ -50,21 +50,23 @@ Arquivos de controle:
 
 ## 2. Pipeline canônico
 
-1. Preparar metadados do Common Voice.
-2. Preprocessar audio para WAV mono.
-3. Selecionar os 4 speakers e validar manifesto.
-4. Extrair embeddings de speaker.
-5. Gerar matriz e ledger de amostras.
-6. Rodar `SpeechT5 zero-shot`.
-7. Rodar `SpeechT5 few-shot decoder fine-tune`.
-8. Rodar `SpeechT5 LoRA`.
-9. Rodar `Parler-TTS` opcionalmente.
-10. Rodar `Whisper`.
-11. Calcular `WER`, `speaker_similarity`, `NISQA`, `F0 RMSE`.
-12. Montar avaliacao humana.
-13. Agregar resultados.
-14. Gerar `report_assets/`.
-15. Abrir demo Gradio.
+1. Aceitar os termos do Common Voice no site do Mozilla Data Collective e exportar o token de API.
+2. Baixar e extrair o dataset `pt` para `data/raw/common_voice_pt/`.
+3. Preparar metadados do subconjunto `pt-BR`.
+4. Preprocessar audio para WAV mono.
+5. Selecionar os 4 speakers e validar manifesto.
+6. Extrair embeddings de speaker.
+7. Gerar matriz e ledger de amostras.
+8. Rodar `SpeechT5 zero-shot`.
+9. Rodar `SpeechT5 few-shot decoder fine-tune`.
+10. Rodar `SpeechT5 LoRA`.
+11. Rodar `Parler-TTS` opcionalmente.
+12. Rodar `Whisper`.
+13. Calcular `WER`, `speaker_similarity`, `NISQA`, `F0 RMSE`.
+14. Montar avaliacao humana.
+15. Agregar resultados.
+16. Gerar `report_assets/`.
+17. Abrir demo Gradio.
 
 ## 3. Runbook: Mac M2 Pro Max host-native com MPS
 
@@ -93,10 +95,23 @@ O bootstrap:
 
 ### Execucao completa no host
 
+Antes do download, aceite os termos do dataset no site do Mozilla Data Collective e exporte:
+
+```bash
+export MOZILLA_DATA_COLLECTIVE_API_KEY="seu_token_aqui"
+```
+
+```bash
+python3 scripts/download_common_voice_pt.py \
+  --out-dir data/raw/common_voice_pt
+```
+
 ```bash
 python3 scripts/prepare_common_voice_metadata.py \
   --tsv data/raw/common_voice_pt/validated.tsv \
   --clips-dir data/raw/common_voice_pt/clips \
+  --locale pt \
+  --variant pt-BR \
   --out data/manifests/common_voice_metadata.csv
 ```
 
@@ -223,7 +238,9 @@ docker compose -f docker/docker-compose.nvidia.yml run --rm tcc-audio-nvidia bas
 Dentro do container:
 
 ```bash
-python3 scripts/prepare_common_voice_metadata.py --tsv /workspace/data/raw/common_voice_pt/validated.tsv --clips-dir /workspace/data/raw/common_voice_pt/clips --out data/manifests/common_voice_metadata.csv
+export MOZILLA_DATA_COLLECTIVE_API_KEY="seu_token_aqui"
+python3 scripts/download_common_voice_pt.py --out-dir /workspace/data/raw/common_voice_pt
+python3 scripts/prepare_common_voice_metadata.py --tsv /workspace/data/raw/common_voice_pt/validated.tsv --clips-dir /workspace/data/raw/common_voice_pt/clips --locale pt --variant pt-BR --out data/manifests/common_voice_metadata.csv
 python3 scripts/preprocess_audio_dataset.py --metadata data/manifests/common_voice_metadata.csv --out-dir data/processed/common_voice_pt --out-metadata data/manifests/common_voice_curated.csv
 python3 scripts/select_speakers.py --metadata data/manifests/common_voice_curated.csv --manifest-out data/manifests/data_manifest.csv --speaker-selection-out data/manifests/speaker_selection.csv
 python3 scripts/validate_manifest.py --manifest data/manifests/data_manifest.csv --prompts data/prompts/ptbr_test_prompts.csv --check-files

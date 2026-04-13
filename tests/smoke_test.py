@@ -1,11 +1,20 @@
 """Smoke checks for the execution scaffold."""
 
+import io
+import os
+import tarfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import pandas as pd
 
 from tcc_audio.common_voice import prepare_common_voice_metadata
+from tcc_audio.common_voice_download import (
+    download_common_voice_pt,
+    request_dataset_download_session,
+    stage_common_voice_archive,
+)
 from tcc_audio.experiments import generate_run_matrix
 from tcc_audio.evaluation import aggregate_metrics
 from tcc_audio.human_eval import build_human_eval_pack, import_human_eval_results
@@ -17,6 +26,38 @@ from tcc_audio.wer import word_error_rate, compute_wer_from_asr
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class MockUrlopenResponse:
+    def __init__(self, payload: bytes) -> None:
+        self._buffer = io.BytesIO(payload)
+
+    def read(self, size: int = -1) -> bytes:
+        return self._buffer.read(size)
+
+    def __enter__(self) -> "MockUrlopenResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+def _build_common_voice_archive_bytes() -> bytes:
+    payload = io.BytesIO()
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        dataset_root = tmp / "cv-corpus-25.0-2026-03-09" / "pt"
+        clips_dir = dataset_root / "clips"
+        clips_dir.mkdir(parents=True, exist_ok=True)
+        (clips_dir / "sample.mp3").write_bytes(b"fake-mp3")
+        (dataset_root / "validated.tsv").write_text(
+            "client_id\tpath\ttext\tgender\tlocale\tvariant\n"
+            "spk1\tsample.mp3\tTexto um.\tmale\tpt\tpt-BR\n",
+            encoding="utf-8",
+        )
+        with tarfile.open(fileobj=payload, mode="w:gz") as archive:
+            archive.add(dataset_root, arcname=dataset_root.relative_to(tmp))
+    return payload.getvalue()
 
 
 def test_prompt_file_has_expected_contract() -> None:
@@ -197,9 +238,32 @@ def test_prepare_common_voice_metadata() -> None:
         tmp = Path(tmpdir)
         tsv_path = tmp / "validated.tsv"
         tsv_path.write_text(
+            "client_id\tpath\ttext\tgender\tlocale\tvariant\n"
+            "spk1\tclip1.mp3\tTexto um.\tmale\tpt\tpt-BR\n"
+            "spk2\tclip2.mp3\tTexto dois.\tfemale\tpt\tpt-PT\n",
+            encoding="utf-8",
+        )
+        prepared = prepare_common_voice_metadata(
+            tsv_path=tsv_path,
+            clips_dir=tmp / "clips",
+            out_path=tmp / "metadata.csv",
+            locale="pt",
+            variant="pt-BR",
+        )
+        assert len(prepared) == 1
+        assert set(prepared["gender"]) == {"masculine"}
+        assert prepared.loc[0, "target_text"] == "Texto um."
+        assert prepared.loc[0, "variant"] == "pt-BR"
+        assert (tmp / "metadata.csv").exists()
+
+
+def test_prepare_common_voice_metadata_falls_back_to_sentence() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        tsv_path = tmp / "validated.tsv"
+        tsv_path.write_text(
             "client_id\tpath\tsentence\tgender\tlocale\n"
-            "spk1\tclip1.mp3\tTexto um.\tmale\tpt\n"
-            "spk2\tclip2.mp3\tTexto dois.\tfemale\tpt\n",
+            "spk1\tclip1.mp3\tTexto legado.\tmale\tpt\n",
             encoding="utf-8",
         )
         prepared = prepare_common_voice_metadata(
@@ -208,9 +272,134 @@ def test_prepare_common_voice_metadata() -> None:
             out_path=tmp / "metadata.csv",
             locale="pt",
         )
-        assert len(prepared) == 2
-        assert set(prepared["gender"]) == {"masculine", "feminine"}
-        assert (tmp / "metadata.csv").exists()
+        assert len(prepared) == 1
+        assert prepared.loc[0, "target_text"] == "Texto legado."
+        assert prepared.loc[0, "variant"] == ""
+
+
+def test_request_dataset_download_session_uses_bearer_token() -> None:
+    requests_seen: list[object] = []
+
+    def fake_urlopen(req: object) -> MockUrlopenResponse:
+        requests_seen.append(req)
+        return MockUrlopenResponse(
+            (
+                '{"downloadUrl":"https://storage.example.com/common-voice-pt.tar.gz",'
+                '"filename":"common-voice-pt.tar.gz",'
+                '"checksum":"sha256:abc123",'
+                '"sizeBytes":"42"}'
+            ).encode("utf-8")
+        )
+
+    with patch("tcc_audio.common_voice_download.request.urlopen", side_effect=fake_urlopen):
+        session = request_dataset_download_session(
+            "cmn29f4cb017bmm07pd9yd8mw",
+            api_key="token-123",
+        )
+
+    request_obj = requests_seen[0]
+    assert request_obj.get_header("Authorization") == "Bearer token-123"
+    assert session.download_url == "https://storage.example.com/common-voice-pt.tar.gz"
+    assert session.filename == "common-voice-pt.tar.gz"
+    assert session.checksum == "sha256:abc123"
+    assert session.size_bytes == 42
+
+
+def test_download_common_voice_pt_stages_archive_with_mocked_http() -> None:
+    archive_bytes = _build_common_voice_archive_bytes()
+
+    def fake_urlopen(req: object) -> MockUrlopenResponse:
+        if hasattr(req, "full_url"):
+            return MockUrlopenResponse(
+                (
+                    '{"downloadUrl":"https://storage.example.com/common-voice-pt.tar.gz",'
+                    '"filename":"common-voice-pt.tar.gz",'
+                    '"checksum":"",'
+                    f'"sizeBytes":"{len(archive_bytes)}"'
+                    "}"
+                ).encode("utf-8")
+            )
+        return MockUrlopenResponse(archive_bytes)
+
+    with TemporaryDirectory() as tmpdir, patch.dict(
+        os.environ,
+        {"MOZILLA_DATA_COLLECTIVE_API_KEY": "token-123"},
+        clear=True,
+    ), patch("tcc_audio.common_voice_download.request.urlopen", side_effect=fake_urlopen):
+        staged = download_common_voice_pt(out_dir=Path(tmpdir) / "data/raw/common_voice_pt")
+
+        assert staged.archive_path.exists()
+        assert staged.clips_dir.exists()
+        assert staged.validated_tsv.exists()
+        assert (staged.clips_dir / "sample.mp3").read_bytes() == b"fake-mp3"
+        assert "Texto um." in staged.validated_tsv.read_text(encoding="utf-8")
+
+
+def test_download_common_voice_pt_requires_api_key_env() -> None:
+    with TemporaryDirectory() as tmpdir, patch.dict(os.environ, {}, clear=True):
+        try:
+            download_common_voice_pt(out_dir=Path(tmpdir) / "data/raw/common_voice_pt")
+        except RuntimeError as exc:
+            assert "MOZILLA_DATA_COLLECTIVE_API_KEY" in str(exc)
+        else:
+            raise AssertionError("Expected missing API key to raise RuntimeError.")
+
+
+def test_download_common_voice_pt_reuses_existing_archive_without_api_call() -> None:
+    with TemporaryDirectory() as tmpdir, patch.dict(
+        os.environ,
+        {"MOZILLA_DATA_COLLECTIVE_API_KEY": "token-123"},
+        clear=True,
+    ), patch("tcc_audio.common_voice_download.request.urlopen") as mocked_urlopen:
+        out_dir = Path(tmpdir) / "data/raw/common_voice_pt"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = out_dir / "common-voice-scripted-speech-25-0-portug-0254cce0.tar.gz"
+        archive_path.write_bytes(_build_common_voice_archive_bytes())
+
+        staged = download_common_voice_pt(out_dir=out_dir)
+
+        mocked_urlopen.assert_not_called()
+        assert staged.archive_path == archive_path
+        assert staged.validated_tsv.exists()
+
+
+def test_stage_common_voice_archive_respects_overwrite() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        archive_path = tmp / "common-voice-pt.tar.gz"
+        archive_path.write_bytes(_build_common_voice_archive_bytes())
+        out_dir = tmp / "data/raw/common_voice_pt"
+
+        staged = stage_common_voice_archive(archive_path, out_dir)
+        assert (staged.clips_dir / "sample.mp3").exists()
+
+        try:
+            stage_common_voice_archive(archive_path, out_dir)
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError("Expected second extraction without overwrite to fail.")
+
+        replacement_archive = tmp / "common-voice-pt-replacement.tar.gz"
+        replacement_payload = io.BytesIO()
+        with TemporaryDirectory() as replacement_tmpdir:
+            replacement_tmp = Path(replacement_tmpdir)
+            dataset_root = replacement_tmp / "release" / "pt"
+            clips_dir = dataset_root / "clips"
+            clips_dir.mkdir(parents=True, exist_ok=True)
+            (clips_dir / "sample.mp3").write_bytes(b"replacement")
+            (dataset_root / "validated.tsv").write_text(
+                "client_id\tpath\ttext\tgender\tlocale\tvariant\n"
+                "spk2\tsample.mp3\tTexto novo.\tfemale\tpt\tpt-BR\n",
+                encoding="utf-8",
+            )
+            with tarfile.open(fileobj=replacement_payload, mode="w:gz") as archive:
+                archive.add(dataset_root, arcname=dataset_root.relative_to(replacement_tmp))
+        replacement_archive.write_bytes(replacement_payload.getvalue())
+
+        restaged = stage_common_voice_archive(replacement_archive, out_dir, overwrite=True)
+        assert (restaged.clips_dir / "sample.mp3").read_bytes() == b"replacement"
+        assert "Texto novo." in restaged.validated_tsv.read_text(encoding="utf-8")
 
 
 def test_human_eval_and_report_assets() -> None:
