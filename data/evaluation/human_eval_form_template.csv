@@ -1,0 +1,1 @@
+evaluator_id,batch_id,prompt_id,speaker_id,left_sample_id,right_sample_id,left_condition,right_condition,mos_left,mos_right,smos_left,smos_right,preferred_condition,notes

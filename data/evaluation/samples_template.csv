@@ -1,0 +1,1 @@
+sample_id,run_id,condition,speaker_id,prompt_id,text_variant,target_text,audio_path,reference_audio_path,speaker_embedding_path,model_name,run_started_at,run_finished_at,failure_reason,wer,speaker_similarity,nisqa,f0_rmse,rtf,train_gpu_hours,inference_seconds,cost_usd,status,lora_gate_status,asr_text

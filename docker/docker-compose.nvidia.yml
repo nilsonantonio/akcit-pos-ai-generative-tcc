@@ -1,0 +1,21 @@
+services:
+  tcc-audio-nvidia:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.gpu
+    working_dir: /workspace
+    volumes:
+      - ..:/workspace
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+      - ${HOME}/.cache/torch:/root/.cache/torch
+    environment:
+      - PYTHONPATH=/workspace
+      - HF_HOME=/root/.cache/huggingface
+      - TORCH_HOME=/root/.cache/torch
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

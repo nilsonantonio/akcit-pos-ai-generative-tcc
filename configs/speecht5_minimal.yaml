@@ -1,0 +1,101 @@
+project:
+  name: tcc_audio_ptbr_speecht5_minimal
+  seed: 42
+  execution_window_weeks: 4
+  team_mode: dupla
+  compute_target: runpod_docker
+  primary_model: microsoft/speecht5_tts
+  vocoder_model: microsoft/speecht5_hifigan
+  speaker_embedding_model: speechbrain/spkrec-ecapa-voxceleb
+
+data:
+  adaptation_dataset: common_voice_pt
+  contextual_dataset: brspeech_df
+  speaker_target_count: 4
+  gender_balance:
+    masculine: 2
+    feminine: 2
+  minutes_per_speaker: 20
+  sample_rate: 16000
+  reference_clip_len_s:
+    min: 3
+    max: 10
+  prompts_path: data/prompts/ptbr_test_prompts.csv
+  manifest_path: data/manifests/data_manifest.csv
+  speaker_selection_path: data/manifests/speaker_selection.csv
+  speaker_embeddings_index: artifacts/embeddings/speaker_embeddings.csv
+
+conditions:
+  - id: speecht5_zero_shot
+    label: SpeechT5 zero-shot
+    regime: zero_shot
+    model_name: microsoft/speecht5_tts
+    trainable: false
+    uses_speaker_embeddings: true
+    normalization_modes: [raw, normalized]
+  - id: speecht5_few_shot_decoder_ft
+    label: SpeechT5 few-shot decoder fine-tune
+    regime: few_shot_adaptation
+    model_name: microsoft/speecht5_tts
+    trainable: true
+    minutes_per_speaker: 20
+    train_strategy: decoder_postnet_ft
+    uses_speaker_embeddings: true
+    normalization_modes: [normalized]
+  - id: speecht5_lora
+    label: SpeechT5 LoRA
+    regime: light_finetune
+    model_name: microsoft/speecht5_tts
+    trainable: true
+    minutes_per_speaker: 20
+    train_strategy: lora
+    uses_speaker_embeddings: true
+    lora_gate:
+      preferred: lora_qkvo
+      fallback: decoder_postnet_ft
+    normalization_modes: [normalized]
+  - id: parler_reference_optional
+    label: Parler-TTS referencia opcional
+    regime: commercial_reference
+    model_name: parler-tts/parler-tts-mini-multilingual-v1.1
+    trainable: false
+    official_hypothesis_arm: false
+    uses_speaker_embeddings: false
+    speaker_subset_count: 2
+    prompt_subset_count: 8
+    normalization_modes: [normalized]
+
+evaluation:
+  asr:
+    name: openai/whisper-small
+    finetuned: false
+  automatic_metrics:
+    - wer
+    - speaker_similarity
+    - nisqa
+    - f0_rmse
+    - rtf
+    - train_gpu_hours
+    - inference_seconds
+    - cost_usd
+  human_eval:
+    evaluator_target_min: 15
+    evaluator_target_max: 20
+    scales:
+      mos: [1, 5]
+      smos: [1, 5]
+    paired_preference: true
+  statistics:
+    paired_test: wilcoxon
+    confidence_interval: bootstrap
+    bootstrap_iterations: 2000
+
+deliverables:
+  run_matrix: artifacts/run_matrix.csv
+  samples: artifacts/evaluation/samples.csv
+  metrics_summary: artifacts/evaluation/metrics_summary.csv
+  cost_summary: artifacts/evaluation/cost_summary.csv
+  human_eval_summary: artifacts/evaluation/human_eval_summary.csv
+  report_assets_dir: report_assets
+  demo_dir: demo
+
