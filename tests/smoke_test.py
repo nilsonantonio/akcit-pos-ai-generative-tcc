@@ -57,9 +57,48 @@ def _build_common_voice_archive_bytes() -> bytes:
             "spk1\tsample.mp3\tTexto um.\tmale\tpt\tpt-BR\n",
             encoding="utf-8",
         )
+        (dataset_root / "validated_sentences.tsv").write_text(
+            "sentence_id\tsentence\tis_used\n"
+            "s1\tTexto um.\t1\n",
+            encoding="utf-8",
+        )
+        (dataset_root / "clip_durations.tsv").write_text(
+            "clip\tduration[ms]\n"
+            "sample.mp3\t1234\n",
+            encoding="utf-8",
+        )
         with tarfile.open(fileobj=payload, mode="w:gz") as archive:
             archive.add(dataset_root, arcname=dataset_root.relative_to(tmp))
     return payload.getvalue()
+
+
+def _write_common_voice_metadata_inputs(
+    tmp: Path,
+    *,
+    validated_rows: list[str],
+    validated_sentences_rows: list[str],
+    clip_duration_rows: list[str],
+) -> tuple[Path, Path, Path]:
+    validated_tsv = tmp / "validated.tsv"
+    validated_sentences_tsv = tmp / "validated_sentences.tsv"
+    clip_durations_tsv = tmp / "clip_durations.tsv"
+
+    validated_tsv.write_text(
+        "client_id\tpath\tsentence_id\tsentence\ttext\tgender\tlocale\tvariant\n"
+        + "".join(validated_rows),
+        encoding="utf-8",
+    )
+    validated_sentences_tsv.write_text(
+        "sentence_id\tsentence\tvariant\n"
+        + "".join(validated_sentences_rows),
+        encoding="utf-8",
+    )
+    clip_durations_tsv.write_text(
+        "clip\tduration[ms]\n"
+        + "".join(clip_duration_rows),
+        encoding="utf-8",
+    )
+    return validated_tsv, validated_sentences_tsv, clip_durations_tsv
 
 
 def test_prompt_file_has_expected_contract() -> None:
@@ -238,45 +277,134 @@ def test_wer_computation() -> None:
 def test_prepare_common_voice_metadata() -> None:
     with TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
-        tsv_path = tmp / "validated.tsv"
-        tsv_path.write_text(
-            "client_id\tpath\ttext\tgender\tlocale\tvariant\n"
-            "spk1\tclip1.mp3\tTexto um.\tmale\tpt\tpt-BR\n"
-            "spk2\tclip2.mp3\tTexto dois.\tfemale\tpt\tpt-PT\n",
-            encoding="utf-8",
+        validated_tsv, _, _ = _write_common_voice_metadata_inputs(
+            tmp,
+            validated_rows=[
+                'spk1\tclip1.mp3\tsid1\tTexto validado 1.\tTexto validado, "com aspas".\tmale_masculine\tpt\t\n',
+                "spk2\tclip2.mp3\tsid2\t\t\t\tpt\tPortuguese (Brasil)\n",
+                "spk3\tclip3.mp3\tsid3\tTexto pt-pt.\t\tfemale_feminine\tpt\tPortuguese (Portugal)\n",
+            ],
+            validated_sentences_rows=[
+                "sid1\tTexto catalogado 1.\tpt-BR\n",
+                'sid2\tTexto catalogado 2, "fallback".\t\n',
+                "sid3\tTexto catalogado 3.\tPortuguese (Portugal)\n",
+            ],
+            clip_duration_rows=[
+                "clip1.mp3\t5256\n",
+                "clip2.mp3\t4032\n",
+                "clip3.mp3\t6000\n",
+            ],
         )
         prepared = prepare_common_voice_metadata(
-            tsv_path=tsv_path,
+            tsv_path=validated_tsv,
             clips_dir=tmp / "clips",
             out_path=tmp / "metadata.csv",
             locale="pt",
             variant="pt-BR",
         )
-        assert len(prepared) == 1
-        assert set(prepared["gender"]) == {"masculine"}
-        assert prepared.loc[0, "target_text"] == "Texto um."
+        assert list(prepared.columns) == [
+            "source_speaker_id",
+            "gender",
+            "utterance_id",
+            "duration_s",
+            "audio_path",
+            "target_text",
+            "license",
+            "source",
+            "locale",
+            "variant",
+        ]
+        assert len(prepared) == 2
+        assert prepared.loc[0, "source_speaker_id"] == "spk1"
+        assert prepared.loc[0, "gender"] == "masculine"
+        assert prepared.loc[0, "target_text"] == 'Texto validado, "com aspas".'
+        assert float(prepared.loc[0, "duration_s"]) == 5.256
+        assert prepared.loc[0, "audio_path"] == str(tmp / "clips" / "clip1.mp3")
         assert prepared.loc[0, "variant"] == "pt-BR"
+        assert prepared.loc[1, "source_speaker_id"] == "spk2"
+        assert prepared.loc[1, "gender"] == "unknown"
+        assert prepared.loc[1, "target_text"] == 'Texto catalogado 2, "fallback".'
+        assert float(prepared.loc[1, "duration_s"]) == 4.032
+        assert prepared.loc[1, "variant"] == "pt-BR"
         assert (tmp / "metadata.csv").exists()
+        serialized = (tmp / "metadata.csv").read_text(encoding="utf-8")
+        assert '"Texto validado, ""com aspas""."' in serialized
+        assert '"Texto catalogado 2, ""fallback""."' in serialized
 
 
-def test_prepare_common_voice_metadata_falls_back_to_sentence() -> None:
+def test_prepare_common_voice_metadata_keeps_variant_empty_without_tsv_value() -> None:
     with TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
-        tsv_path = tmp / "validated.tsv"
-        tsv_path.write_text(
-            "client_id\tpath\tsentence\tgender\tlocale\n"
-            "spk1\tclip1.mp3\tTexto legado.\tmale\tpt\n",
-            encoding="utf-8",
+        validated_tsv, _, _ = _write_common_voice_metadata_inputs(
+            tmp,
+            validated_rows=[
+                "spk1\tclip1.mp3\tsid1\tTexto validado.\t\tmale\tpt\t\n",
+            ],
+            validated_sentences_rows=[
+                "sid1\tTexto catalogado.\t\n",
+            ],
+            clip_duration_rows=[
+                "clip1.mp3\t5256\n",
+            ],
         )
         prepared = prepare_common_voice_metadata(
-            tsv_path=tsv_path,
+            tsv_path=validated_tsv,
             clips_dir=tmp / "clips",
             out_path=tmp / "metadata.csv",
             locale="pt",
         )
         assert len(prepared) == 1
-        assert prepared.loc[0, "target_text"] == "Texto legado."
         assert prepared.loc[0, "variant"] == ""
+
+
+def test_prepare_common_voice_metadata_rejects_missing_validated_sentence_merge() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        validated_tsv, _, _ = _write_common_voice_metadata_inputs(
+            tmp,
+            validated_rows=[
+                "spk1\tclip1.mp3\tsid1\tTexto validado.\t\tmale\tpt\tpt-BR\n",
+            ],
+            validated_sentences_rows=[],
+            clip_duration_rows=[
+                "clip1.mp3\t5256\n",
+            ],
+        )
+        try:
+            prepare_common_voice_metadata(
+                tsv_path=validated_tsv,
+                clips_dir=tmp / "clips",
+                out_path=tmp / "metadata.csv",
+            )
+        except ValueError as exc:
+            assert "validated_sentences" in str(exc)
+        else:
+            raise AssertionError("Expected missing validated_sentences merge to raise ValueError.")
+
+
+def test_prepare_common_voice_metadata_rejects_missing_clip_duration_merge() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        validated_tsv, _, _ = _write_common_voice_metadata_inputs(
+            tmp,
+            validated_rows=[
+                "spk1\tclip1.mp3\tsid1\tTexto validado.\t\tmale\tpt\tpt-BR\n",
+            ],
+            validated_sentences_rows=[
+                "sid1\tTexto catalogado.\tpt-BR\n",
+            ],
+            clip_duration_rows=[],
+        )
+        try:
+            prepare_common_voice_metadata(
+                tsv_path=validated_tsv,
+                clips_dir=tmp / "clips",
+                out_path=tmp / "metadata.csv",
+            )
+        except ValueError as exc:
+            assert "clip durations" in str(exc)
+        else:
+            raise AssertionError("Expected missing clip durations merge to raise ValueError.")
 
 
 def test_request_dataset_download_session_uses_bearer_token() -> None:
@@ -333,8 +461,12 @@ def test_download_common_voice_pt_stages_archive_with_mocked_http() -> None:
         assert staged.archive_path.exists()
         assert staged.clips_dir.exists()
         assert staged.validated_tsv.exists()
+        assert staged.validated_sentences_path.exists()
+        assert staged.clip_durations_path.exists()
         assert (staged.clips_dir / "sample.mp3").read_bytes() == b"fake-mp3"
         assert "Texto um." in staged.validated_tsv.read_text(encoding="utf-8")
+        assert "Texto um." in staged.validated_sentences_path.read_text(encoding="utf-8")
+        assert "sample.mp3" in staged.clip_durations_path.read_text(encoding="utf-8")
 
 
 def test_download_common_voice_pt_requires_api_key_env() -> None:
@@ -363,6 +495,8 @@ def test_download_common_voice_pt_reuses_existing_archive_without_api_call() -> 
         mocked_urlopen.assert_not_called()
         assert staged.archive_path == archive_path
         assert staged.validated_tsv.exists()
+        assert staged.validated_sentences_path.exists()
+        assert staged.clip_durations_path.exists()
 
 
 def test_stage_common_voice_archive_respects_overwrite() -> None:
@@ -374,6 +508,8 @@ def test_stage_common_voice_archive_respects_overwrite() -> None:
 
         staged = stage_common_voice_archive(archive_path, out_dir)
         assert (staged.clips_dir / "sample.mp3").exists()
+        assert staged.validated_sentences_path.exists()
+        assert staged.clip_durations_path.exists()
 
         try:
             stage_common_voice_archive(archive_path, out_dir)
@@ -395,6 +531,16 @@ def test_stage_common_voice_archive_respects_overwrite() -> None:
                 "spk2\tsample.mp3\tTexto novo.\tfemale\tpt\tpt-BR\n",
                 encoding="utf-8",
             )
+            (dataset_root / "validated_sentences.tsv").write_text(
+                "sentence_id\tsentence\tis_used\n"
+                "s2\tTexto novo.\t1\n",
+                encoding="utf-8",
+            )
+            (dataset_root / "clip_durations.tsv").write_text(
+                "clip\tduration[ms]\n"
+                "sample.mp3\t4321\n",
+                encoding="utf-8",
+            )
             with tarfile.open(fileobj=replacement_payload, mode="w:gz") as archive:
                 archive.add(dataset_root, arcname=dataset_root.relative_to(replacement_tmp))
         replacement_archive.write_bytes(replacement_payload.getvalue())
@@ -402,6 +548,8 @@ def test_stage_common_voice_archive_respects_overwrite() -> None:
         restaged = stage_common_voice_archive(replacement_archive, out_dir, overwrite=True)
         assert (restaged.clips_dir / "sample.mp3").read_bytes() == b"replacement"
         assert "Texto novo." in restaged.validated_tsv.read_text(encoding="utf-8")
+        assert "Texto novo." in restaged.validated_sentences_path.read_text(encoding="utf-8")
+        assert "4321" in restaged.clip_durations_path.read_text(encoding="utf-8")
 
 
 def test_human_eval_and_report_assets() -> None:

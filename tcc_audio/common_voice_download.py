@@ -21,6 +21,8 @@ DEFAULT_DATASET_ID = "cmn29f4cb017bmm07pd9yd8mw"
 DEFAULT_DATASET_SLUG = "common-voice-scripted-speech-25-0-portug-0254cce0"
 DEFAULT_API_KEY_ENV = "MOZILLA_DATA_COLLECTIVE_API_KEY"
 DOWNLOAD_CHUNK_SIZE = 1024 * 1024
+VALIDATED_SENTENCES_FILENAMES = ("validated_sentences.tsv", "validated_sentences.csv")
+CLIP_DURATIONS_FILENAMES = ("clip_durations.tsv", "clip_duration.csv", "clip_durations.csv")
 
 
 @dataclass(frozen=True)
@@ -36,6 +38,8 @@ class StagedCommonVoicePaths:
     archive_path: Path
     clips_dir: Path
     validated_tsv: Path
+    validated_sentences_path: Path
+    clip_durations_path: Path
 
 
 def _require_api_key(env_var: str) -> str:
@@ -175,6 +179,14 @@ def _select_candidate(paths: list[Path], *, label: str) -> Path:
     return min(paths, key=lambda path: (len(path.parts), str(path)))
 
 
+def _select_candidate_by_names(extract_root: Path, filenames: tuple[str, ...], *, label: str) -> Path:
+    candidates = [
+        path for path in extract_root.rglob("*")
+        if path.is_file() and path.name in filenames
+    ]
+    return _select_candidate(candidates, label=label)
+
+
 def _safe_extract_archive(archive_path: Path, destination: Path) -> None:
     destination_resolved = destination.resolve()
     with tarfile.open(archive_path, "r:*") as archive:
@@ -192,6 +204,16 @@ def _replace_path(source: Path, destination: Path) -> None:
         else:
             destination.unlink()
     shutil.move(str(source), str(destination))
+
+
+def _remove_conflicting_paths(paths: list[Path], *, keep: Path) -> None:
+    for path in paths:
+        if path == keep or not path.exists():
+            continue
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
 
 
 def _resolve_existing_archive(out_dir: Path, dataset_slug: str) -> Path | None:
@@ -219,8 +241,13 @@ def stage_common_voice_archive(
     out_root.mkdir(parents=True, exist_ok=True)
     clips_dir = out_root / "clips"
     validated_tsv = out_root / "validated.tsv"
+    existing_validated_sentences = [out_root / filename for filename in VALIDATED_SENTENCES_FILENAMES]
+    existing_clip_durations = [out_root / filename for filename in CLIP_DURATIONS_FILENAMES]
 
-    if not overwrite and (clips_dir.exists() or validated_tsv.exists()):
+    if not overwrite and any(
+        path.exists()
+        for path in [clips_dir, validated_tsv, *existing_validated_sentences, *existing_clip_durations]
+    ):
         raise FileExistsError(
             f"Refusing to overwrite existing extraction target in {out_root}. Use --force-extract."
         )
@@ -237,14 +264,32 @@ def stage_common_voice_archive(
             [path for path in extract_root.rglob("validated.tsv") if path.is_file()],
             label="validated.tsv file",
         )
+        validated_sentences_source = _select_candidate_by_names(
+            extract_root,
+            VALIDATED_SENTENCES_FILENAMES,
+            label="validated_sentences file",
+        )
+        clip_durations_source = _select_candidate_by_names(
+            extract_root,
+            CLIP_DURATIONS_FILENAMES,
+            label="clip durations file",
+        )
+        validated_sentences_path = out_root / validated_sentences_source.name
+        clip_durations_path = out_root / clip_durations_source.name
 
+        _remove_conflicting_paths(existing_validated_sentences, keep=validated_sentences_path)
+        _remove_conflicting_paths(existing_clip_durations, keep=clip_durations_path)
         _replace_path(clips_source, clips_dir)
         _replace_path(validated_source, validated_tsv)
+        _replace_path(validated_sentences_source, validated_sentences_path)
+        _replace_path(clip_durations_source, clip_durations_path)
 
     return StagedCommonVoicePaths(
         archive_path=archive,
         clips_dir=clips_dir,
         validated_tsv=validated_tsv,
+        validated_sentences_path=validated_sentences_path,
+        clip_durations_path=clip_durations_path,
     )
 
 
@@ -302,6 +347,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Archive: {staged.archive_path}")
     print(f"Clips: {staged.clips_dir}")
     print(f"Validated TSV: {staged.validated_tsv}")
+    print(f"Validated Sentences: {staged.validated_sentences_path}")
+    print(f"Clip Durations: {staged.clip_durations_path}")
     return 0
 
 
