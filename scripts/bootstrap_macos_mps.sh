@@ -23,7 +23,6 @@ if not torch.backends.mps.is_available():
 print("MPS disponivel:", torch.backends.mps.is_available())
 PY
 
-python -B -c "from tests.smoke_test import *; test_prompt_file_has_expected_contract(); test_run_matrix_generation(); test_speaker_selection_from_curated_metadata(); test_metric_aggregation_contract(); test_wer_computation(); test_prepare_common_voice_metadata(); test_human_eval_and_report_assets(); print('smoke tests passed')"
+python -B tests/smoke_test.py extended
 
 echo "Bootstrap macOS MPS finalizado."
-

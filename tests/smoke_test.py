@@ -2,12 +2,17 @@
 
 import io
 import os
+import sys
 import tarfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import pandas as pd
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from tcc_audio.common_voice import prepare_common_voice_metadata
 from tcc_audio.common_voice_download import (
@@ -23,9 +28,6 @@ from tcc_audio.report_assets import make_report_assets
 from tcc_audio.samples import initialize_samples
 from tcc_audio.speaker_selection import select_speakers
 from tcc_audio.wer import word_error_rate, compute_wer_from_asr
-
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 class MockUrlopenResponse:
@@ -471,3 +473,35 @@ def test_human_eval_and_report_assets() -> None:
         outputs = make_report_assets(samples_path, metrics_path, costs_path, tmp / "human_eval_summary.csv", tmp / "report_assets")
         assert (tmp / "report_assets/overview.md").exists()
         assert "metrics_markdown" in outputs
+
+
+BOOTSTRAP_SMOKE_TESTS = (
+    test_prompt_file_has_expected_contract,
+    test_run_matrix_generation,
+    test_speaker_selection_from_curated_metadata,
+    test_metric_aggregation_contract,
+    test_wer_computation,
+    test_prepare_common_voice_metadata,
+    test_human_eval_and_report_assets,
+)
+
+BOOTSTRAP_SMOKE_TEST_PROFILES = {
+    "core": BOOTSTRAP_SMOKE_TESTS[:5],
+    "extended": BOOTSTRAP_SMOKE_TESTS,
+}
+
+
+def run_bootstrap_smoke_tests(profile: str = "extended") -> None:
+    try:
+        smoke_tests = BOOTSTRAP_SMOKE_TEST_PROFILES[profile]
+    except KeyError as exc:
+        raise ValueError(f"Unknown smoke test profile: {profile}") from exc
+
+    for smoke_test in smoke_tests:
+        smoke_test()
+
+
+if __name__ == "__main__":
+    selected_profile = sys.argv[1] if len(sys.argv) > 1 else "extended"
+    run_bootstrap_smoke_tests(profile=selected_profile)
+    print("smoke tests passed")
