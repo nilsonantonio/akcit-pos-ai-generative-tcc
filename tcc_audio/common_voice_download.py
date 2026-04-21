@@ -12,7 +12,9 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from urllib import error, request
+from dotenv import load_dotenv
 
+load_dotenv()
 
 API_BASE_URL = "https://mozilladatacollective.com/api"
 DEFAULT_DATASET_ID = "cmn29f4cb017bmm07pd9yd8mw"
@@ -37,7 +39,8 @@ class StagedCommonVoicePaths:
 
 
 def _require_api_key(env_var: str) -> str:
-    api_key = os.environ.get(env_var, "").strip()
+    #api_key = os.environ.get(env_var, "").strip()
+    api_key = os.getenv(env_var, "").strip()
     if not api_key:
         raise RuntimeError(
             f"Missing API key. Export {env_var} with a Mozilla Data Collective bearer token first."
