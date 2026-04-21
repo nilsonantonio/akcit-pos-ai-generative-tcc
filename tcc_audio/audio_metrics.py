@@ -9,14 +9,7 @@ import numpy as np
 import pandas as pd
 
 from tcc_audio.runtime import load_samples, refresh_sample_status, save_samples
-
-
-def _load_speechbrain():
-    try:
-        from speechbrain.inference.speaker import EncoderClassifier
-    except ImportError as exc:
-        raise SystemExit("speechbrain is required for speaker similarity.") from exc
-    return EncoderClassifier
+from tcc_audio.speechbrain_compat import encode_audio_path, load_encoder_classifier
 
 
 def _load_librosa():
@@ -32,7 +25,7 @@ def compute_speaker_similarity(
     out_path: str | Path,
     model_name: str = "speechbrain/spkrec-ecapa-voxceleb",
 ) -> pd.DataFrame:
-    EncoderClassifier = _load_speechbrain()
+    EncoderClassifier = load_encoder_classifier()
     classifier = EncoderClassifier.from_hparams(source=model_name)
     samples = load_samples(samples_path)
     subset = samples[samples["audio_path"].astype(str).str.strip().ne("")]
@@ -44,8 +37,8 @@ def compute_speaker_similarity(
         if not audio_path.exists() or not reference_audio.exists():
             continue
         try:
-            generated = classifier.encode_file(str(audio_path)).detach().cpu().numpy().reshape(-1)
-            reference = classifier.encode_file(str(reference_audio)).detach().cpu().numpy().reshape(-1)
+            generated = encode_audio_path(classifier, audio_path)
+            reference = encode_audio_path(classifier, reference_audio)
             score = float(np.dot(generated, reference) / (np.linalg.norm(generated) * np.linalg.norm(reference)))
             samples.loc[samples["sample_id"].eq(sample_id), "speaker_similarity"] = score
         except Exception as exc:  # pragma: no cover - runtime integration path

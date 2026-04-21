@@ -9,14 +9,7 @@ import numpy as np
 import pandas as pd
 
 from tcc_audio.io import ensure_parent_dir, read_csv
-
-
-def _load_speechbrain():
-    try:
-        from speechbrain.inference.speaker import EncoderClassifier
-    except ImportError as exc:
-        raise SystemExit("speechbrain is required. Install with requirements-cpu-macos.txt or requirements-gpu.txt.") from exc
-    return EncoderClassifier
+from tcc_audio.speechbrain_compat import encode_audio_path, load_encoder_classifier
 
 
 def extract_speaker_embeddings(
@@ -25,7 +18,7 @@ def extract_speaker_embeddings(
     out_dir: str | Path,
     model_name: str = "speechbrain/spkrec-ecapa-voxceleb",
 ) -> pd.DataFrame:
-    EncoderClassifier = _load_speechbrain()
+    EncoderClassifier = load_encoder_classifier()
     selection = read_csv(speaker_selection_path)
     required = {"speaker_id", "reference_audio"}
     missing = required.difference(selection.columns)
@@ -40,7 +33,7 @@ def extract_speaker_embeddings(
     for _, row in selection.iterrows():
         speaker_id = row["speaker_id"]
         reference_audio = Path(row["reference_audio"])
-        embedding = classifier.encode_file(str(reference_audio)).detach().cpu().numpy().reshape(-1)
+        embedding = encode_audio_path(classifier, reference_audio)
         embedding_path = out_root / f"{speaker_id}.npy"
         np.save(embedding_path, embedding)
         rows.append(
