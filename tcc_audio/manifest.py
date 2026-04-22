@@ -8,13 +8,14 @@ from pathlib import Path
 
 import pandas as pd
 
-from tcc_audio.io import read_csv
+from tcc_audio.io import read_csv, read_yaml
 from tcc_audio.schema import (
     DATA_MANIFEST_REQUIRED_COLUMNS,
     PROMPTS_REQUIRED_COLUMNS,
     VALID_SPLITS,
     VALID_TEXT_VARIANTS,
 )
+from tcc_audio.speecht5_text import count_unk_tokens, normalize_text_for_speecht5
 
 
 @dataclass
@@ -36,6 +37,19 @@ def _missing_columns(df: pd.DataFrame, required: list[str]) -> list[str]:
 
 def _is_blank(value: object) -> bool:
     return str(value).strip() == ""
+
+
+def _load_speecht5_tokenizer(model_name: str):
+    try:
+        from transformers import SpeechT5Tokenizer
+    except ImportError as exc:
+        raise RuntimeError(
+            "Missing SpeechT5 validation dependencies. Install with requirements-gpu.txt."
+        ) from exc
+    try:
+        return SpeechT5Tokenizer.from_pretrained(model_name, local_files_only=True)
+    except Exception:
+        return SpeechT5Tokenizer.from_pretrained(model_name)
 
 
 def validate_prompts(path: str | Path) -> ValidationReport:
@@ -71,6 +85,7 @@ def validate_data_manifest(
     prompts_path: str | Path | None = None,
     check_files: bool = False,
     project_root: str | Path = ".",
+    config_path: str | Path | None = None,
 ) -> ValidationReport:
     manifest_path = Path(path)
     manifest = read_csv(manifest_path)
@@ -137,6 +152,51 @@ def validate_data_manifest(
         report.warnings.extend([f"Prompts: {warning}" for warning in prompt_report.warnings])
         report.summary.update({f"prompts_{key}": value for key, value in prompt_report.summary.items()})
 
+    if config_path:
+        config = read_yaml(config_path)
+        model_name = str(config.get("project", {}).get("primary_model", "")).strip()
+        if not model_name:
+            report.errors.append("Config: missing project.primary_model for SpeechT5 manifest validation.")
+            return report
+        try:
+            tokenizer = _load_speecht5_tokenizer(model_name)
+        except Exception as exc:
+            report.errors.append(f"Could not load SpeechT5 tokenizer for '{model_name}': {exc}")
+            return report
+
+        raw_rows_with_unk = 0
+        normalized_rows_with_unk = 0
+        normalized_fallback_rows = 0
+        has_audit_column = "target_text_speecht5" in manifest.columns
+        if not has_audit_column:
+            report.warnings.append(
+                "SpeechT5 audit column 'target_text_speecht5' not found; using in-memory normalization fallback."
+            )
+
+        for row_number, row in manifest.iterrows():
+            line = row_number + 2
+            raw_text = row["target_text"]
+            normalized_text = (
+                str(row.get("target_text_speecht5", "")).strip() if has_audit_column else ""
+            )
+            if not normalized_text:
+                normalized_text = normalize_text_for_speecht5(raw_text)
+                normalized_fallback_rows += 1
+
+            if count_unk_tokens(raw_text, tokenizer):
+                raw_rows_with_unk += 1
+            if count_unk_tokens(normalized_text, tokenizer):
+                normalized_rows_with_unk += 1
+                report.errors.append(f"Line {line}: SpeechT5 text still produces <unk> after normalization")
+
+        report.summary["speecht5_rows_with_unk_raw"] = raw_rows_with_unk
+        report.summary["speecht5_rows_with_unk_normalized"] = normalized_rows_with_unk
+        if has_audit_column and normalized_fallback_rows:
+            report.warnings.append(
+                f"SpeechT5 audit column 'target_text_speecht5' was blank in {normalized_fallback_rows} rows; "
+                "used in-memory normalization fallback."
+            )
+
     return report
 
 
@@ -155,6 +215,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Validate the TCC data manifest.")
     parser.add_argument("--manifest", required=True, help="Path to data manifest CSV.")
     parser.add_argument("--prompts", help="Path to PT-BR prompts CSV.")
+    parser.add_argument("--config", help="Optional experiment YAML to validate SpeechT5 tokenization compatibility.")
     parser.add_argument("--check-files", action="store_true", help="Check reference_audio paths.")
     parser.add_argument("--project-root", default=".", help="Root for relative audio paths.")
     return parser
@@ -167,6 +228,7 @@ def main(argv: list[str] | None = None) -> int:
         prompts_path=args.prompts,
         check_files=args.check_files,
         project_root=args.project_root,
+        config_path=args.config,
     )
     print_report(report)
     return 0 if report.ok else 1

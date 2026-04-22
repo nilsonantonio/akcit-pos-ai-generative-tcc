@@ -16,6 +16,7 @@ import pandas as pd
 
 from tcc_audio.io import ensure_parent_dir, read_csv, read_yaml
 from tcc_audio.runtime import EmbeddingIndex, load_samples, now_utc_iso, refresh_sample_status, save_samples, stringify_csv_value
+from tcc_audio.speecht5_text import normalize_text_for_speecht5
 
 
 def _load_torch_stack():
@@ -238,6 +239,12 @@ def _build_dataset(manifest: pd.DataFrame, speaker_embedding_map: dict[str, str]
     librosa = stack["librosa"]
     Dataset = stack["Dataset"]
 
+    def _resolve_training_text(row: pd.Series) -> str:
+        normalized_text = str(row.get("target_text_speecht5", "")).strip()
+        if normalized_text:
+            return normalized_text
+        return normalize_text_for_speecht5(row["target_text"])
+
     class SpeechT5TTSDataset(Dataset):
         def __init__(self, frame: pd.DataFrame, processor):
             self.frame = frame.reset_index(drop=True)
@@ -250,7 +257,7 @@ def _build_dataset(manifest: pd.DataFrame, speaker_embedding_map: dict[str, str]
             row = self.frame.iloc[index]
             audio, _ = librosa.load(row["audio_path"], sr=sample_rate)
             processed = self.processor(
-                text=row["target_text"],
+                text=_resolve_training_text(row),
                 audio_target=audio,
                 sampling_rate=sample_rate,
                 return_attention_mask=False,

@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 
 from tcc_audio.io import ensure_parent_dir, read_csv
+from tcc_audio.speecht5_text import normalize_text_for_speecht5
 
 
 INPUT_COLUMNS = [
@@ -106,6 +107,7 @@ def select_speakers(
                         "audio_path": row["audio_path"],
                         "reference_audio": reference_row["audio_path"],
                         "target_text": row["target_text"],
+                        "target_text_speecht5": normalize_text_for_speecht5(row["target_text"]),
                         "text_variant": "normalized",
                     }
                 )

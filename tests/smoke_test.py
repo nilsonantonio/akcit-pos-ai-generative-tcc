@@ -33,12 +33,13 @@ from tcc_audio.config import (
 from tcc_audio.experiments import generate_run_matrix
 from tcc_audio.evaluation import aggregate_metrics
 from tcc_audio.human_eval import build_human_eval_pack, import_human_eval_results
-from tcc_audio.manifest import validate_prompts
+from tcc_audio.manifest import validate_data_manifest, validate_prompts
 from tcc_audio.report_assets import make_report_assets
 from tcc_audio.samples import initialize_samples
 from tcc_audio.speaker_selection import select_speakers
 from tcc_audio.speaker_embeddings import extract_speaker_embeddings
 from tcc_audio.speecht5_runner import _load_speaker_embedding, _load_torch_stack, _load_training_stack
+from tcc_audio.speecht5_text import count_unk_tokens, has_unk_tokens, normalize_text_for_speecht5
 from tcc_audio.wer import word_error_rate, compute_wer_from_asr
 
 
@@ -177,7 +178,7 @@ def test_speaker_selection_from_curated_metadata() -> None:
                             "utterance_id": f"{source_speaker_id}_{utterance_index}",
                             "duration_s": 120,
                             "audio_path": f"audio/{source_speaker_id}_{utterance_index}.wav",
-                            "target_text": "Texto de teste para selecao de speaker.",
+                            "target_text": 'Ação de teste com “aspas” para seleção de speaker.',
                             "license": "CC0",
                             "source": "common_voice_pt",
                             "locale": "pt",
@@ -195,6 +196,8 @@ def test_speaker_selection_from_curated_metadata() -> None:
         assert speaker_selection["speaker_id"].nunique() == 4
         assert manifest["speaker_id"].nunique() == 4
         assert "audio_path" in manifest.columns
+        assert "target_text_speecht5" in manifest.columns
+        assert manifest.loc[0, "target_text_speecht5"] == 'Acao de teste com "aspas" para selecao de speaker.'
         assert "parler_description" in speaker_selection.columns
 
 
@@ -435,44 +438,134 @@ def test_speecht5_training_stack_reports_missing_lzma(monkeypatch) -> None:
             raise AssertionError("expected training stack to fail without lzma support")
 
 
-def test_speecht5_dataset_preserves_full_text_sequence(monkeypatch) -> None:
+def test_speecht5_dataset_preserves_full_text_sequence() -> None:
     from tcc_audio.speecht5_runner import _build_dataset
 
-    monkeypatch.setattr(
+    with patch(
         "tcc_audio.speecht5_runner._load_torch_stack",
-        lambda: {
+        return_value={
             "librosa": types.SimpleNamespace(load=lambda *args, **kwargs: (np.zeros(1600, dtype=np.float32), 16000)),
             "Dataset": type("Dataset", (), {}),
         },
-    )
-    monkeypatch.setattr(
+    ), patch(
         "tcc_audio.speecht5_runner._load_speaker_embedding",
-        lambda *args, **kwargs: np.zeros((1, 512), dtype=np.float32),
-    )
+        return_value=np.zeros((1, 512), dtype=np.float32),
+    ):
+        class FakeProcessor:
+            def __call__(self, **kwargs):
+                assert kwargs["text"] == 'Acao de teste com "aspas".'
+                return {
+                    "input_ids": [11, 22, 33],
+                    "labels": np.zeros((1, 5, 80), dtype=np.float32),
+                }
 
-    class FakeProcessor:
-        def __call__(self, **kwargs):
-            assert kwargs["text"] == "Texto de teste."
-            return {
-                "input_ids": [11, 22, 33],
-                "labels": np.zeros((1, 5, 80), dtype=np.float32),
-            }
-
-    frame = pd.DataFrame(
-        [
-            {
-                "audio_path": "dummy.wav",
-                "target_text": "Texto de teste.",
-                "speaker_id": "speaker_01",
-            }
-        ]
-    )
-    DatasetClass = _build_dataset(frame, {"speaker_01": "speaker.npy"}, sample_rate=16000)
-    item = DatasetClass(frame, FakeProcessor())[0]
+        frame = pd.DataFrame(
+            [
+                {
+                    "audio_path": "dummy.wav",
+                    "target_text": 'Ação de teste com “aspas”.',
+                    "target_text_speecht5": 'Acao de teste com "aspas".',
+                    "speaker_id": "speaker_01",
+                }
+            ]
+        )
+        DatasetClass = _build_dataset(frame, {"speaker_01": "speaker.npy"}, sample_rate=16000)
+        item = DatasetClass(frame, FakeProcessor())[0]
 
     assert item["input_ids"] == [11, 22, 33]
     assert item["labels"].shape == (5, 80)
     assert item["speaker_embeddings"].shape == (512,)
+
+
+def test_speecht5_dataset_normalizes_legacy_manifest_text() -> None:
+    from tcc_audio.speecht5_runner import _build_dataset
+
+    with patch(
+        "tcc_audio.speecht5_runner._load_torch_stack",
+        return_value={
+            "librosa": types.SimpleNamespace(load=lambda *args, **kwargs: (np.zeros(1600, dtype=np.float32), 16000)),
+            "Dataset": type("Dataset", (), {}),
+        },
+    ), patch(
+        "tcc_audio.speecht5_runner._load_speaker_embedding",
+        return_value=np.zeros((1, 512), dtype=np.float32),
+    ):
+        class FakeProcessor:
+            def __call__(self, **kwargs):
+                assert kwargs["text"] == "Acao rapida em portugues brasileiro."
+                return {
+                    "input_ids": [44, 55],
+                    "labels": np.zeros((1, 3, 80), dtype=np.float32),
+                }
+
+        frame = pd.DataFrame(
+            [
+                {
+                    "audio_path": "dummy.wav",
+                    "target_text": "Ação rápida em português brasileiro.",
+                    "speaker_id": "speaker_01",
+                }
+            ]
+        )
+        DatasetClass = _build_dataset(frame, {"speaker_01": "speaker.npy"}, sample_rate=16000)
+        item = DatasetClass(frame, FakeProcessor())[0]
+
+    assert item["input_ids"] == [44, 55]
+    assert item["labels"].shape == (3, 80)
+
+
+def test_speecht5_text_normalization_and_unk_audit() -> None:
+    class FakeTokenizer:
+        unk_token_id = 99
+
+        def __call__(self, text: str, return_attention_mask: bool = False) -> dict[str, list[int]]:
+            del return_attention_mask
+            return {"input_ids": [99 if ord(character) > 127 else 1 for character in text]}
+
+    normalized = normalize_text_for_speecht5('“Ação à noite, café e pinguim ü”')
+
+    assert normalized == '"Acao a noite, cafe e pinguim u"'
+    assert count_unk_tokens('“Ação à noite, café e pinguim ü”', FakeTokenizer()) > 0
+    assert not has_unk_tokens(normalized, FakeTokenizer())
+
+
+def test_validate_manifest_with_config_audits_speecht5_unknown_tokens() -> None:
+    class FakeTokenizer:
+        unk_token_id = 99
+
+        def __call__(self, text: str, return_attention_mask: bool = False) -> dict[str, list[int]]:
+            del return_attention_mask
+            return {"input_ids": [99 if ord(character) > 127 else 1 for character in text]}
+
+    with patch("tcc_audio.manifest._load_speecht5_tokenizer", return_value=FakeTokenizer()):
+        with TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            manifest_path = tmp / "data_manifest.csv"
+            config_path = tmp / "config.yaml"
+            config_path.write_text("project:\n  primary_model: microsoft/speecht5_tts\n", encoding="utf-8")
+            pd.DataFrame(
+                [
+                    {
+                        "speaker_id": "speaker_01",
+                        "utterance_id": "utt_001",
+                        "split": "train",
+                        "duration_s": "3.2",
+                        "source": "common_voice_pt",
+                        "license": "CC0-1.0",
+                        "audio_path": "audio.wav",
+                        "reference_audio": "reference.wav",
+                        "target_text": "Ação rápida em português brasileiro.",
+                        "target_text_speecht5": "Acao rapida em portugues brasileiro.",
+                        "text_variant": "normalized",
+                    }
+                ]
+            ).to_csv(manifest_path, index=False)
+
+            report = validate_data_manifest(manifest_path, config_path=config_path)
+
+            assert report.ok, report.errors
+            assert report.summary["speecht5_rows_with_unk_raw"] == 1
+            assert report.summary["speecht5_rows_with_unk_normalized"] == 0
 
 
 def test_speecht5_embedding_dimension_validation() -> None:
@@ -929,10 +1022,14 @@ BOOTSTRAP_SMOKE_TESTS = (
     test_prompt_file_has_expected_contract,
     test_run_matrix_generation,
     test_speaker_selection_from_curated_metadata,
+    test_speecht5_text_normalization_and_unk_audit,
+    test_validate_manifest_with_config_audits_speecht5_unknown_tokens,
     test_speaker_embedding_config_resolution,
     test_extract_speaker_embeddings_uses_configured_tts_model,
     test_extract_speaker_embeddings_override_wins_over_config,
     test_compute_speaker_similarity_uses_configured_eval_model,
+    test_speecht5_dataset_preserves_full_text_sequence,
+    test_speecht5_dataset_normalizes_legacy_manifest_text,
     test_speecht5_embedding_dimension_validation,
     test_metric_aggregation_contract,
     test_wer_computation,
