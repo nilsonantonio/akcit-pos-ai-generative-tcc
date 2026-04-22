@@ -38,7 +38,7 @@ from tcc_audio.report_assets import make_report_assets
 from tcc_audio.samples import initialize_samples
 from tcc_audio.speaker_selection import select_speakers
 from tcc_audio.speaker_embeddings import extract_speaker_embeddings
-from tcc_audio.speecht5_runner import _load_speaker_embedding, _load_torch_stack
+from tcc_audio.speecht5_runner import _load_speaker_embedding, _load_torch_stack, _load_training_stack
 from tcc_audio.wer import word_error_rate, compute_wer_from_asr
 
 
@@ -414,6 +414,65 @@ def test_speecht5_zero_shot_loader_does_not_require_training_stack(monkeypatch) 
     assert stack["Dataset"] is fake_dataset
     assert "Seq2SeqTrainer" not in stack
     assert "Seq2SeqTrainingArguments" not in stack
+
+
+def test_speecht5_training_stack_reports_missing_lzma(monkeypatch) -> None:
+    real_import = __import__
+
+    def _guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "_lzma":
+            raise ModuleNotFoundError("No module named '_lzma'", name="_lzma")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr("tcc_audio.speecht5_runner._load_torch_stack", lambda: {})
+    with patch("builtins.__import__", side_effect=_guarded_import):
+        try:
+            _load_training_stack()
+        except SystemExit as exc:
+            assert "_lzma" in str(exc)
+            assert "python3 -c" in str(exc)
+        else:
+            raise AssertionError("expected training stack to fail without lzma support")
+
+
+def test_speecht5_dataset_preserves_full_text_sequence(monkeypatch) -> None:
+    from tcc_audio.speecht5_runner import _build_dataset
+
+    monkeypatch.setattr(
+        "tcc_audio.speecht5_runner._load_torch_stack",
+        lambda: {
+            "librosa": types.SimpleNamespace(load=lambda *args, **kwargs: (np.zeros(1600, dtype=np.float32), 16000)),
+            "Dataset": type("Dataset", (), {}),
+        },
+    )
+    monkeypatch.setattr(
+        "tcc_audio.speecht5_runner._load_speaker_embedding",
+        lambda *args, **kwargs: np.zeros((1, 512), dtype=np.float32),
+    )
+
+    class FakeProcessor:
+        def __call__(self, **kwargs):
+            assert kwargs["text"] == "Texto de teste."
+            return {
+                "input_ids": [11, 22, 33],
+                "labels": np.zeros((1, 5, 80), dtype=np.float32),
+            }
+
+    frame = pd.DataFrame(
+        [
+            {
+                "audio_path": "dummy.wav",
+                "target_text": "Texto de teste.",
+                "speaker_id": "speaker_01",
+            }
+        ]
+    )
+    DatasetClass = _build_dataset(frame, {"speaker_01": "speaker.npy"}, sample_rate=16000)
+    item = DatasetClass(frame, FakeProcessor())[0]
+
+    assert item["input_ids"] == [11, 22, 33]
+    assert item["labels"].shape == (5, 80)
+    assert item["speaker_embeddings"].shape == (512,)
 
 
 def test_speecht5_embedding_dimension_validation() -> None:

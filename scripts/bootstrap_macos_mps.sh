@@ -4,6 +4,21 @@ set -euo pipefail
 python3 -m venv .venv
 source .venv/bin/activate
 
+python - <<'PY'
+import sys
+
+try:
+    import lzma  # noqa: F401
+    import _lzma  # noqa: F401
+except ModuleNotFoundError:
+    print(
+        "Este Python foi compilado sem suporte a lzma (_lzma). "
+        "No macOS com Homebrew/asdf: rode `brew install xz`, reinstale o Python e recrie a .venv.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+
 python -m pip install --upgrade pip
 python -m pip install -r requirements-macos-mps.txt
 

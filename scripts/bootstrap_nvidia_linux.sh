@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+python3 - <<'PY'
+import sys
+
+try:
+    import lzma  # noqa: F401
+    import _lzma  # noqa: F401
+except ModuleNotFoundError:
+    print(
+        "Este Python foi compilado sem suporte a lzma (_lzma). "
+        "Instale xz/liblzma-dev no host, reinstale o Python e recrie o ambiente virtual.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+PY
+
 python3 -m pip install --upgrade pip
 python3 -m pip install -r requirements-linux-gpu.txt
 

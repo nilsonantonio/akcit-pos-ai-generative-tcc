@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import math
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,8 +44,30 @@ def _load_torch_stack():
     }
 
 
+def _ensure_lzma_available() -> None:
+    try:
+        import _lzma  # noqa: F401
+        import lzma  # noqa: F401
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"_lzma", "lzma"}:
+            raise
+        if sys.platform == "darwin":
+            hint = "No macOS com Homebrew/asdf: instale `xz`, reinstale o Python e recrie `.venv`."
+        elif sys.platform.startswith("linux"):
+            hint = "No Linux: instale `xz-utils`/`liblzma-dev`, reinstale o Python e recrie o ambiente virtual."
+        else:
+            hint = "Reinstale o Python com suporte a `xz/liblzma` e recrie o ambiente virtual."
+        raise SystemExit(
+            "SpeechT5 few-shot/LoRA training requires Python stdlib `lzma` support (`_lzma`). "
+            f"Current interpreter: {sys.executable}. "
+            f"{hint} "
+            "Validate with `python3 -c \"import lzma, _lzma\"`."
+        ) from exc
+
+
 def _load_training_stack():
     stack = _load_torch_stack()
+    _ensure_lzma_available()
     try:
         from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments
     except ImportError as exc:
@@ -232,7 +256,7 @@ def _build_dataset(manifest: pd.DataFrame, speaker_embedding_map: dict[str, str]
                 return_attention_mask=False,
             )
             return {
-                "input_ids": processed["input_ids"][0],
+                "input_ids": processed["input_ids"],
                 "labels": processed["labels"][0],
                 "speaker_embeddings": _load_speaker_embedding(
                     speaker_embedding_map[row["speaker_id"]],
@@ -334,30 +358,40 @@ def _fine_tune(
         output_dir = Path(checkpoint_dir) / condition_id / speaker_id
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        training_args = stack["Seq2SeqTrainingArguments"](
-            output_dir=str(output_dir),
-            per_device_train_batch_size=per_device_batch_size,
-            per_device_eval_batch_size=per_device_batch_size,
-            learning_rate=learning_rate,
-            max_steps=max_steps,
-            evaluation_strategy="steps",
-            save_strategy="steps",
-            save_steps=max(10, max_steps // 5),
-            eval_steps=max(10, max_steps // 5),
-            logging_steps=max(5, max_steps // 10),
-            load_best_model_at_end=False,
-            report_to=[],
-            fp16=torch.cuda.is_available(),
-        )
+        training_args_kwargs = {
+            "output_dir": str(output_dir),
+            "per_device_train_batch_size": per_device_batch_size,
+            "per_device_eval_batch_size": per_device_batch_size,
+            "learning_rate": learning_rate,
+            "max_steps": max_steps,
+            "save_strategy": "steps",
+            "save_steps": max(10, max_steps // 5),
+            "eval_steps": max(10, max_steps // 5),
+            "logging_steps": max(5, max_steps // 10),
+            "load_best_model_at_end": False,
+            "report_to": [],
+            "fp16": torch.cuda.is_available(),
+            "dataloader_pin_memory": torch.cuda.is_available(),
+        }
+        if "eval_strategy" in stack["Seq2SeqTrainingArguments"].__dataclass_fields__:
+            training_args_kwargs["eval_strategy"] = "steps"
+        else:
+            training_args_kwargs["evaluation_strategy"] = "steps"
+        training_args = stack["Seq2SeqTrainingArguments"](**training_args_kwargs)
 
-        trainer = stack["Seq2SeqTrainer"](
-            model=model,
-            args=training_args,
-            train_dataset=DatasetClass(speaker_train, processor),
-            eval_dataset=DatasetClass(speaker_val, processor) if not speaker_val.empty else None,
-            data_collator=_make_collator(processor, model),
-            tokenizer=processor,
-        )
+        trainer_kwargs = {
+            "model": model,
+            "args": training_args,
+            "train_dataset": DatasetClass(speaker_train, processor),
+            "eval_dataset": DatasetClass(speaker_val, processor) if not speaker_val.empty else None,
+            "data_collator": _make_collator(processor, model),
+        }
+        trainer_signature = inspect.signature(stack["Seq2SeqTrainer"].__init__)
+        if "processing_class" in trainer_signature.parameters:
+            trainer_kwargs["processing_class"] = processor
+        else:
+            trainer_kwargs["tokenizer"] = processor
+        trainer = stack["Seq2SeqTrainer"](**trainer_kwargs)
 
         started = time.perf_counter()
         trainer.train()
