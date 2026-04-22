@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 from tcc_audio.io import ensure_parent_dir, read_csv, read_yaml
-from tcc_audio.runtime import EmbeddingIndex, load_samples, now_utc_iso, refresh_sample_status, save_samples
+from tcc_audio.runtime import EmbeddingIndex, load_samples, now_utc_iso, refresh_sample_status, save_samples, stringify_csv_value
 
 
 def _load_torch_stack():
@@ -23,8 +23,6 @@ def _load_torch_stack():
         import torch
         from torch.utils.data import Dataset
         from transformers import (
-            Seq2SeqTrainer,
-            Seq2SeqTrainingArguments,
             SpeechT5ForTextToSpeech,
             SpeechT5HifiGan,
             SpeechT5Processor,
@@ -38,12 +36,23 @@ def _load_torch_stack():
         "sf": sf,
         "torch": torch,
         "Dataset": Dataset,
-        "Seq2SeqTrainer": Seq2SeqTrainer,
-        "Seq2SeqTrainingArguments": Seq2SeqTrainingArguments,
         "SpeechT5ForTextToSpeech": SpeechT5ForTextToSpeech,
         "SpeechT5HifiGan": SpeechT5HifiGan,
         "SpeechT5Processor": SpeechT5Processor,
     }
+
+
+def _load_training_stack():
+    stack = _load_torch_stack()
+    try:
+        from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments
+    except ImportError as exc:
+        raise SystemExit(
+            "Missing SpeechT5 training dependencies. Install with requirements-gpu.txt."
+        ) from exc
+    stack["Seq2SeqTrainer"] = Seq2SeqTrainer
+    stack["Seq2SeqTrainingArguments"] = Seq2SeqTrainingArguments
+    return stack
 
 
 def _load_peft():
@@ -88,6 +97,20 @@ def _load_embedding(path: str | Path) -> np.ndarray:
     return embedding.reshape(1, -1).astype(np.float32)
 
 
+def _load_speaker_embedding(path: str | Path, expected_dim: int | None = None) -> np.ndarray:
+    embedding = _load_embedding(path)
+    if expected_dim is not None and embedding.shape[1] != expected_dim:
+        message = (
+            "Speaker embedding dimension mismatch in the SpeechT5 synthesis path: "
+            f"got {embedding.shape[1]}, expected {expected_dim}. "
+            "`speaker_embedding_path` must point to synthesis embeddings, not evaluation embeddings. "
+        )
+        if expected_dim == 512:
+            message += "Regenerate TTS synthesis embeddings with 'speechbrain/spkrec-xvect-voxceleb'."
+        raise ValueError(message)
+    return embedding
+
+
 def generate_speech_to_file(
     context: SpeechT5Context,
     text: str,
@@ -99,7 +122,10 @@ def generate_speech_to_file(
     inputs = context.processor(text=text, return_tensors="pt")
     device = next(context.model.parameters()).device
     input_ids = inputs["input_ids"].to(device)
-    speaker_embeddings = torch.tensor(_load_embedding(speaker_embedding_path)).to(device)
+    expected_dim = int(getattr(context.model.config, "speaker_embedding_dim", 512))
+    speaker_embeddings = torch.tensor(
+        _load_speaker_embedding(speaker_embedding_path, expected_dim=expected_dim)
+    ).to(device)
 
     started = time.perf_counter()
     with torch.no_grad():
@@ -167,8 +193,8 @@ def run_condition_inference(
             samples.loc[samples["sample_id"].eq(sample_id), "run_started_at"] = started_at
             samples.loc[samples["sample_id"].eq(sample_id), "run_finished_at"] = now_utc_iso()
             samples.loc[samples["sample_id"].eq(sample_id), "failure_reason"] = ""
-            samples.loc[samples["sample_id"].eq(sample_id), "inference_seconds"] = inference_seconds
-            samples.loc[samples["sample_id"].eq(sample_id), "rtf"] = rtf
+            samples.loc[samples["sample_id"].eq(sample_id), "inference_seconds"] = stringify_csv_value(inference_seconds)
+            samples.loc[samples["sample_id"].eq(sample_id), "rtf"] = stringify_csv_value(rtf)
             samples.loc[samples["sample_id"].eq(sample_id), "status"] = "generated"
             if condition_id == "speecht5_lora":
                 samples.loc[samples["sample_id"].eq(sample_id), "lora_gate_status"] = "stable_lora"
@@ -208,7 +234,10 @@ def _build_dataset(manifest: pd.DataFrame, speaker_embedding_map: dict[str, str]
             return {
                 "input_ids": processed["input_ids"][0],
                 "labels": processed["labels"][0],
-                "speaker_embeddings": np.load(speaker_embedding_map[row["speaker_id"]]).astype(np.float32),
+                "speaker_embeddings": _load_speaker_embedding(
+                    speaker_embedding_map[row["speaker_id"]],
+                    expected_dim=512,
+                )[0],
             }
 
     return SpeechT5TTSDataset
@@ -272,7 +301,7 @@ def _fine_tune(
     manifest = read_csv(manifest_path)
     samples = load_samples(samples_path)
     sample_rate = int(config["data"].get("sample_rate", 16000))
-    stack = _load_torch_stack()
+    stack = _load_training_stack()
     torch = stack["torch"]
     processor = stack["SpeechT5Processor"].from_pretrained(config["project"]["primary_model"])
     speaker_embedding_map = _prepare_speaker_embedding_map(config["data"]["speaker_embeddings_index"])
@@ -340,8 +369,8 @@ def _fine_tune(
         ].copy()
         train_cost_share = elapsed_hours / max(len(evaluation_rows), 1)
         usd_share = train_cost_share * gpu_hourly_rate
-        samples.loc[evaluation_rows.index, "train_gpu_hours"] = train_cost_share
-        samples.loc[evaluation_rows.index, "cost_usd"] = usd_share
+        samples.loc[evaluation_rows.index, "train_gpu_hours"] = stringify_csv_value(train_cost_share)
+        samples.loc[evaluation_rows.index, "cost_usd"] = stringify_csv_value(usd_share)
         samples.loc[evaluation_rows.index, "model_name"] = config["project"]["primary_model"]
         if lora:
             samples.loc[evaluation_rows.index, "lora_gate_status"] = "stable_lora"

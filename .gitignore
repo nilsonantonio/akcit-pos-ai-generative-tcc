@@ -11,10 +11,10 @@ report_assets/
 data/raw/
 data/interim/
 data/processed/
+data/manifests/
 *.wav
 *.mp3
 *.flac
-data/manifests/common_voice_curated.csv
 
 !data/manifests/*_template.csv
 !data/manifests/common_voice_curated_input_template.csv

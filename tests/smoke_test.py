@@ -4,10 +4,12 @@ import io
 import os
 import sys
 import tarfile
+import types
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +22,14 @@ from tcc_audio.common_voice_download import (
     request_dataset_download_session,
     stage_common_voice_archive,
 )
+from tcc_audio.audio_metrics import compute_speaker_similarity
+from tcc_audio.config import (
+    DEFAULT_SPEAKER_SIMILARITY_MODEL,
+    DEFAULT_TTS_SPEAKER_EMBEDDING_DIM,
+    resolve_speaker_similarity_model,
+    resolve_tts_speaker_embedding_dim,
+    resolve_tts_speaker_embedding_model,
+)
 from tcc_audio.experiments import generate_run_matrix
 from tcc_audio.evaluation import aggregate_metrics
 from tcc_audio.human_eval import build_human_eval_pack, import_human_eval_results
@@ -27,6 +37,8 @@ from tcc_audio.manifest import validate_prompts
 from tcc_audio.report_assets import make_report_assets
 from tcc_audio.samples import initialize_samples
 from tcc_audio.speaker_selection import select_speakers
+from tcc_audio.speaker_embeddings import extract_speaker_embeddings
+from tcc_audio.speecht5_runner import _load_speaker_embedding, _load_torch_stack
 from tcc_audio.wer import word_error_rate, compute_wer_from_asr
 
 
@@ -184,6 +196,237 @@ def test_speaker_selection_from_curated_metadata() -> None:
         assert manifest["speaker_id"].nunique() == 4
         assert "audio_path" in manifest.columns
         assert "parler_description" in speaker_selection.columns
+
+
+def test_speaker_embedding_config_resolution() -> None:
+    modern = {
+        "project": {
+            "tts_speaker_embedding_model": "custom/xvector",
+            "tts_speaker_embedding_dim": 256,
+        },
+        "evaluation": {
+            "speaker_similarity_model": "custom/ecapa",
+        },
+    }
+    legacy = {
+        "project": {
+            "speaker_embedding_model": "legacy/model",
+        }
+    }
+
+    assert resolve_tts_speaker_embedding_model(modern) == "custom/xvector"
+    assert resolve_tts_speaker_embedding_dim(modern) == 256
+    assert resolve_speaker_similarity_model(modern) == "custom/ecapa"
+
+    assert resolve_tts_speaker_embedding_model(legacy) == "legacy/model"
+    assert resolve_tts_speaker_embedding_dim(legacy) == DEFAULT_TTS_SPEAKER_EMBEDDING_DIM
+    assert resolve_speaker_similarity_model(legacy) == DEFAULT_SPEAKER_SIMILARITY_MODEL
+
+
+def test_extract_speaker_embeddings_uses_configured_tts_model() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        config_path = tmp / "config.yaml"
+        selection_path = tmp / "speaker_selection.csv"
+        out_index = tmp / "speaker_embeddings.csv"
+        out_dir = tmp / "embeddings"
+        reference_audio = tmp / "reference.wav"
+        reference_audio.write_bytes(b"fake")
+        config_path.write_text(
+            "project:\n"
+            "  tts_speaker_embedding_model: speechbrain/spkrec-xvect-voxceleb\n"
+            "  tts_speaker_embedding_dim: 512\n",
+            encoding="utf-8",
+        )
+        pd.DataFrame(
+            [{"speaker_id": "speaker_01", "reference_audio": str(reference_audio)}]
+        ).to_csv(selection_path, index=False)
+
+        calls: dict[str, str] = {}
+
+        class FakeEncoderClassifier:
+            @classmethod
+            def from_hparams(cls, source: str):
+                calls["source"] = source
+                return object()
+
+        with patch("tcc_audio.speaker_embeddings.load_encoder_classifier", return_value=FakeEncoderClassifier):
+            with patch(
+                "tcc_audio.speaker_embeddings.encode_audio_path",
+                return_value=np.zeros(512, dtype=np.float32),
+            ):
+                frame = extract_speaker_embeddings(
+                    speaker_selection_path=selection_path,
+                    out_index=out_index,
+                    out_dir=out_dir,
+                    config_path=config_path,
+                )
+
+        assert calls["source"] == "speechbrain/spkrec-xvect-voxceleb"
+        assert int(frame.iloc[0]["embedding_dim"]) == 512
+        assert Path(frame.iloc[0]["speaker_embedding_path"]).exists()
+
+
+def test_extract_speaker_embeddings_override_wins_over_config() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        config_path = tmp / "config.yaml"
+        selection_path = tmp / "speaker_selection.csv"
+        out_index = tmp / "speaker_embeddings.csv"
+        out_dir = tmp / "embeddings"
+        reference_audio = tmp / "reference.wav"
+        reference_audio.write_bytes(b"fake")
+        config_path.write_text(
+            "project:\n"
+            "  tts_speaker_embedding_model: speechbrain/spkrec-xvect-voxceleb\n"
+            "  tts_speaker_embedding_dim: 512\n",
+            encoding="utf-8",
+        )
+        pd.DataFrame(
+            [{"speaker_id": "speaker_01", "reference_audio": str(reference_audio)}]
+        ).to_csv(selection_path, index=False)
+
+        calls: dict[str, str] = {}
+
+        class FakeEncoderClassifier:
+            @classmethod
+            def from_hparams(cls, source: str):
+                calls["source"] = source
+                return object()
+
+        with patch("tcc_audio.speaker_embeddings.load_encoder_classifier", return_value=FakeEncoderClassifier):
+            with patch(
+                "tcc_audio.speaker_embeddings.encode_audio_path",
+                return_value=np.zeros(192, dtype=np.float32),
+            ):
+                frame = extract_speaker_embeddings(
+                    speaker_selection_path=selection_path,
+                    out_index=out_index,
+                    out_dir=out_dir,
+                    config_path=config_path,
+                    model_name="override/model",
+                    expected_dim=192,
+                )
+
+        assert calls["source"] == "override/model"
+        assert int(frame.iloc[0]["embedding_dim"]) == 192
+
+
+def test_compute_speaker_similarity_uses_configured_eval_model() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        config_path = tmp / "config.yaml"
+        samples_path = tmp / "samples.csv"
+        generated_audio = tmp / "generated.wav"
+        reference_audio = tmp / "reference.wav"
+        generated_audio.write_bytes(b"fake")
+        reference_audio.write_bytes(b"fake")
+        config_path.write_text(
+            "evaluation:\n"
+            "  speaker_similarity_model: speechbrain/spkrec-ecapa-voxceleb\n",
+            encoding="utf-8",
+        )
+        pd.DataFrame(
+            [
+                {
+                    "sample_id": "s1",
+                    "run_id": "r1",
+                    "condition": "speecht5_zero_shot",
+                    "speaker_id": "speaker_01",
+                    "prompt_id": "P001",
+                    "text_variant": "normalized",
+                    "target_text": "Texto de teste.",
+                    "audio_path": str(generated_audio),
+                    "reference_audio_path": str(reference_audio),
+                    "speaker_embedding_path": "tts_embedding.npy",
+                    "model_name": "microsoft/speecht5_tts",
+                    "run_started_at": "",
+                    "run_finished_at": "",
+                    "failure_reason": "",
+                    "wer": "",
+                    "speaker_similarity": "",
+                    "nisqa": "",
+                    "f0_rmse": "",
+                    "rtf": "",
+                    "train_gpu_hours": "",
+                    "inference_seconds": "",
+                    "cost_usd": "",
+                    "status": "generated",
+                    "lora_gate_status": "",
+                }
+            ]
+        ).to_csv(samples_path, index=False)
+
+        calls: dict[str, str] = {}
+
+        class FakeEncoderClassifier:
+            @classmethod
+            def from_hparams(cls, source: str):
+                calls["source"] = source
+                return object()
+
+        with patch("tcc_audio.audio_metrics.load_encoder_classifier", return_value=FakeEncoderClassifier):
+            with patch(
+                "tcc_audio.audio_metrics.encode_audio_path",
+                side_effect=[np.array([1.0, 0.0], dtype=np.float32), np.array([1.0, 0.0], dtype=np.float32)],
+            ):
+                updated = compute_speaker_similarity(samples_path, samples_path, config_path=config_path)
+
+        assert calls["source"] == "speechbrain/spkrec-ecapa-voxceleb"
+        assert float(updated.loc[updated["sample_id"].eq("s1"), "speaker_similarity"].iloc[0]) == 1.0
+
+
+def test_speecht5_zero_shot_loader_does_not_require_training_stack(monkeypatch) -> None:
+    fake_librosa = types.ModuleType("librosa")
+    fake_soundfile = types.ModuleType("soundfile")
+    fake_torch = types.ModuleType("torch")
+    fake_torch_utils = types.ModuleType("torch.utils")
+    fake_torch_utils_data = types.ModuleType("torch.utils.data")
+    fake_dataset = type("Dataset", (), {})
+    fake_torch_utils_data.Dataset = fake_dataset
+    fake_torch.utils = fake_torch_utils
+    fake_torch_utils.data = fake_torch_utils_data
+
+    fake_transformers = types.ModuleType("transformers")
+    fake_transformers.SpeechT5ForTextToSpeech = object()
+    fake_transformers.SpeechT5HifiGan = object()
+    fake_transformers.SpeechT5Processor = object()
+
+    def _guard_training_import(name: str):
+        if name in {"Seq2SeqTrainer", "Seq2SeqTrainingArguments"}:
+            raise AssertionError("zero-shot loader should not import training classes")
+        raise AttributeError(name)
+
+    fake_transformers.__getattr__ = _guard_training_import
+
+    monkeypatch.setitem(sys.modules, "librosa", fake_librosa)
+    monkeypatch.setitem(sys.modules, "soundfile", fake_soundfile)
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.setitem(sys.modules, "torch.utils", fake_torch_utils)
+    monkeypatch.setitem(sys.modules, "torch.utils.data", fake_torch_utils_data)
+    monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
+
+    stack = _load_torch_stack()
+
+    assert stack["librosa"] is fake_librosa
+    assert stack["sf"] is fake_soundfile
+    assert stack["torch"] is fake_torch
+    assert stack["Dataset"] is fake_dataset
+    assert "Seq2SeqTrainer" not in stack
+    assert "Seq2SeqTrainingArguments" not in stack
+
+
+def test_speecht5_embedding_dimension_validation() -> None:
+    with TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "speaker.npy"
+        np.save(path, np.zeros(192, dtype=np.float32))
+        try:
+            _load_speaker_embedding(path, expected_dim=512)
+        except ValueError as exc:
+            assert "synthesis path" in str(exc)
+            assert "speaker_embedding_path" in str(exc)
+        else:
+            raise AssertionError("expected speaker embedding dimension validation to fail")
 
 
 def test_metric_aggregation_contract() -> None:
@@ -627,6 +870,11 @@ BOOTSTRAP_SMOKE_TESTS = (
     test_prompt_file_has_expected_contract,
     test_run_matrix_generation,
     test_speaker_selection_from_curated_metadata,
+    test_speaker_embedding_config_resolution,
+    test_extract_speaker_embeddings_uses_configured_tts_model,
+    test_extract_speaker_embeddings_override_wins_over_config,
+    test_compute_speaker_similarity_uses_configured_eval_model,
+    test_speecht5_embedding_dimension_validation,
     test_metric_aggregation_contract,
     test_wer_computation,
     test_prepare_common_voice_metadata,

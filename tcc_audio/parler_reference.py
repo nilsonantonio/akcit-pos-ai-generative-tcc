@@ -9,7 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from tcc_audio.io import read_csv, read_yaml
-from tcc_audio.runtime import load_samples, now_utc_iso, save_samples
+from tcc_audio.runtime import load_samples, now_utc_iso, save_samples, stringify_csv_value
 
 
 def _load_parler():
@@ -69,7 +69,7 @@ def run_parler_reference(
             samples.loc[samples["sample_id"].eq(sample_id), "model_name"] = model_name
             samples.loc[samples["sample_id"].eq(sample_id), "run_started_at"] = started
             samples.loc[samples["sample_id"].eq(sample_id), "run_finished_at"] = now_utc_iso()
-            samples.loc[samples["sample_id"].eq(sample_id), "inference_seconds"] = inference_seconds
+            samples.loc[samples["sample_id"].eq(sample_id), "inference_seconds"] = stringify_csv_value(inference_seconds)
             samples.loc[samples["sample_id"].eq(sample_id), "status"] = "generated"
         except Exception as exc:  # pragma: no cover - runtime integration path
             samples.loc[samples["sample_id"].eq(sample_id), "failure_reason"] = str(exc)
@@ -97,4 +97,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

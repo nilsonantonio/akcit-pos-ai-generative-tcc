@@ -10,12 +10,14 @@ from tcc_audio.audio_metrics import build_arg_parser, compute_speaker_similarity
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_arg_parser("speaker similarity").parse_args(argv)
-    compute_speaker_similarity(args.samples, args.out)
+    parser = build_arg_parser("speaker similarity")
+    parser.add_argument("--config", help="Optional experiment config used to resolve evaluation.speaker_similarity_model.")
+    parser.add_argument("--model-name", help="Override the speaker similarity model from config.")
+    args = parser.parse_args(argv)
+    compute_speaker_similarity(args.samples, args.out, model_name=args.model_name, config_path=args.config)
     print(f"Updated speaker similarity in {args.out}")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -104,7 +104,13 @@ export MOZILLA_DATA_COLLECTIVE_API_KEY="seu_token_aqui"
 ```bash
 python3 scripts/download_common_voice_pt.py \
   --out-dir data/raw/common_voice_pt
+
+# 3m
+# Archive: data/raw/common_voice_pt/common-voice-scripted-speech-25-0-portug-0254cce0.tar.gz
+# Clips: data/raw/common_voice_pt/clips
+# Validated TSV: data/raw/common_voice_pt/validated.tsv
 ```
+
 
 ```bash
 python3 scripts/prepare_common_voice_metadata.py \
@@ -113,6 +119,9 @@ python3 scripts/prepare_common_voice_metadata.py \
   --locale pt \
   --variant pt-BR \
   --out data/manifests/common_voice_metadata.csv
+
+# 2m
+# Wrote 66183 Common Voice metadata rows to data/manifests/common_voice_curated.csv
 ```
 
 ```bash
@@ -120,6 +129,9 @@ python3 scripts/preprocess_audio_dataset.py \
   --metadata data/manifests/common_voice_metadata.csv \
   --out-dir data/processed/common_voice_pt \
   --out-metadata data/manifests/common_voice_curated.csv
+
+# 30m
+# Wrote 66193 processed metadata rows to data/manifests/common_voice_curated.csv
 ```
 
 ```bash
@@ -127,6 +139,10 @@ python3 scripts/select_speakers.py \
   --metadata data/manifests/common_voice_curated.csv \
   --manifest-out data/manifests/data_manifest.csv \
   --speaker-selection-out data/manifests/speaker_selection.csv
+
+# 2s
+# Selected 6 speakers
+# Wrote 1200 manifest rows
 ```
 
 ```bash
@@ -134,19 +150,44 @@ python3 scripts/validate_manifest.py \
   --manifest data/manifests/data_manifest.csv \
   --prompts data/prompts/ptbr_test_prompts.csv \
   --check-files
+
+# 3s
+# OK: data/manifests/data_manifest.csv (1200 rows)
+# summary.prompts_commercial_subset_count=8
+# summary.prompts_prompt_categories=abreviacoes, expressivas, homografos, interrogativas, neutras, numeros
+# summary.prompts_prompt_subexperiment_count=8
+# summary.speaker_count=6
+# summary.total_duration_s=7214.9039999999995
 ```
 
 ```bash
 python3 scripts/extract_speaker_embeddings.py \
+  --config configs/speecht5_minimal.yaml \
   --speaker-selection data/manifests/speaker_selection.csv \
   --out-index artifacts/embeddings/speaker_embeddings.csv \
   --out-dir artifacts/embeddings
+
+# o extrator agora usa por padrao `speechbrain/spkrec-xvect-voxceleb`,
+# que gera embeddings 512-d compativeis com o SpeechT5.
+# o campo `speaker_embedding_path` em `samples.csv` representa esse embedding de sintese.
+
+# 10s
+# hyperparams.yaml: 2.04kB [00:00, 4.93MB/s]
+# embedding_model.ckpt: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 16.9M/16.9M [00:03<00:00, 5.62MB/s]
+# mean_var_norm_emb.ckpt: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 3.20k/3.20k [00:01<00:00, 3.19kB/s]
+# classifier.ckpt: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 15.9M/15.9M [00:02<00:00, 7.91MB/s]
+# label_encoder.txt: 129kB [00:00, 41.9MB/s]
+# Wrote 6 speaker embeddings to artifacts/embeddings/speaker_embeddings.csv
 ```
 
 ```bash
 python3 scripts/generate_run_matrix.py \
   --config configs/speecht5_minimal.yaml \
   --out artifacts/run_matrix.csv
+
+# 2s
+# Generated 400 runs
+# Wrote artifacts/run_matrix.csv
 ```
 
 ```bash
@@ -155,12 +196,29 @@ python3 scripts/init_samples.py \
   --speaker-selection data/manifests/speaker_selection.csv \
   --speaker-embeddings artifacts/embeddings/speaker_embeddings.csv \
   --out artifacts/evaluation/samples.csv
+
+# 2s
+# Wrote 400 sample rows to artifacts/evaluation/samples.csv
 ```
 
 ```bash
 python3 scripts/run_speecht5_zero_shot.py \
   --config configs/speecht5_minimal.yaml \
   --samples artifacts/evaluation/samples.csv
+
+# 8m
+# preprocessor_config.json: 100%|███████████████████████████████████████████████████████████████████████████████████████| 433/433 [00:00<00:00, 1.29MB/s]
+# tokenizer_config.json: 100%|██████████████████████████████████████████████████████████████████████████████████████████| 232/232 [00:00<00:00, 2.76MB/s]
+# spm_char.model: 100%|████████████████████████████████████████████████████████████████████████████████████████████████| 238k/238k [00:01<00:00, 237kB/s]
+# added_tokens.json: 100%|█████████████████████████████████████████████████████████████████████████████████████████████| 40.0/40.0 [00:00<00:00, 311kB/s]
+# special_tokens_map.json: 100%|████████████████████████████████████████████████████████████████████████████████████████| 234/234 [00:00<00:00, 1.15MB/s]
+# config.json: 2.06kB [00:00, 5.62MB/s]
+# pytorch_model.bin: 100%|████████████████████████████████████████████████████████████████████████████████████████████| 585M/585M [00:06<00:00, 86.1MB/s]
+# config.json: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████| 636/636 [00:00<00:00, 2.50MB/s]
+# pytorch_model.bin: 100%|██████████████████████████████████████████████████████████████████████████████████████████| 50.7M/50.7M [00:01<00:00, 28.1MB/s]
+# model.safetensors: 100%|█████████████████████████████████████████████████████████████████████████████████████████████| 585M/585M [00:05<00:00, 117MB/s]
+# model.safetensors: 100%|██████████████████████████████████████████████████████████████████████████████████████████| 50.6M/50.6M [00:01<00:00, 28.1MB/s]
+# SpeechT5 zero-shot inference completed
 ```
 
 Pilotos de treino recomendados primeiro:
@@ -188,7 +246,7 @@ Depois do piloto, rode as fases restantes:
 ```bash
 python3 scripts/run_whisper_batch.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
 python3 scripts/compute_wer.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
-python3 scripts/compute_speaker_similarity.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
+python3 scripts/compute_speaker_similarity.py --config configs/speecht5_minimal.yaml --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
 python3 scripts/compute_nisqa.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
 python3 scripts/compute_f0_rmse.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
 python3 scripts/build_human_eval_pack.py --samples artifacts/evaluation/samples.csv --out-dir artifacts/human_eval_pack
@@ -244,7 +302,7 @@ python3 scripts/prepare_common_voice_metadata.py --tsv /workspace/data/raw/commo
 python3 scripts/preprocess_audio_dataset.py --metadata data/manifests/common_voice_metadata.csv --out-dir data/processed/common_voice_pt --out-metadata data/manifests/common_voice_curated.csv
 python3 scripts/select_speakers.py --metadata data/manifests/common_voice_curated.csv --manifest-out data/manifests/data_manifest.csv --speaker-selection-out data/manifests/speaker_selection.csv
 python3 scripts/validate_manifest.py --manifest data/manifests/data_manifest.csv --prompts data/prompts/ptbr_test_prompts.csv --check-files
-python3 scripts/extract_speaker_embeddings.py --speaker-selection data/manifests/speaker_selection.csv --out-index artifacts/embeddings/speaker_embeddings.csv --out-dir artifacts/embeddings
+python3 scripts/extract_speaker_embeddings.py --config configs/speecht5_minimal.yaml --speaker-selection data/manifests/speaker_selection.csv --out-index artifacts/embeddings/speaker_embeddings.csv --out-dir artifacts/embeddings
 python3 scripts/generate_run_matrix.py --config configs/speecht5_minimal.yaml --out artifacts/run_matrix.csv
 python3 scripts/init_samples.py --run-matrix artifacts/run_matrix.csv --speaker-selection data/manifests/speaker_selection.csv --speaker-embeddings artifacts/embeddings/speaker_embeddings.csv --out artifacts/evaluation/samples.csv
 python3 scripts/run_speecht5_zero_shot.py --config configs/speecht5_minimal.yaml --samples artifacts/evaluation/samples.csv
@@ -253,7 +311,7 @@ python3 scripts/run_speecht5_lora.py --config configs/speecht5_minimal.yaml --ma
 python3 scripts/run_parler_reference.py --config configs/speecht5_minimal.yaml --samples artifacts/evaluation/samples.csv
 python3 scripts/run_whisper_batch.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
 python3 scripts/compute_wer.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
-python3 scripts/compute_speaker_similarity.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
+python3 scripts/compute_speaker_similarity.py --config configs/speecht5_minimal.yaml --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
 python3 scripts/compute_nisqa.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
 python3 scripts/compute_f0_rmse.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
 python3 scripts/build_human_eval_pack.py --samples artifacts/evaluation/samples.csv --out-dir artifacts/human_eval_pack

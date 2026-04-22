@@ -8,7 +8,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from tcc_audio.runtime import load_samples, refresh_sample_status, save_samples
+from tcc_audio.config import load_experiment_config, resolve_speaker_similarity_model
+from tcc_audio.runtime import load_samples, refresh_sample_status, save_samples, stringify_csv_value
 from tcc_audio.speechbrain_compat import encode_audio_path, load_encoder_classifier
 
 
@@ -23,10 +24,13 @@ def _load_librosa():
 def compute_speaker_similarity(
     samples_path: str | Path,
     out_path: str | Path,
-    model_name: str = "speechbrain/spkrec-ecapa-voxceleb",
+    model_name: str | None = None,
+    config_path: str | Path | None = None,
 ) -> pd.DataFrame:
+    config = load_experiment_config(config_path)
+    resolved_model_name = model_name or resolve_speaker_similarity_model(config)
     EncoderClassifier = load_encoder_classifier()
-    classifier = EncoderClassifier.from_hparams(source=model_name)
+    classifier = EncoderClassifier.from_hparams(source=resolved_model_name)
     samples = load_samples(samples_path)
     subset = samples[samples["audio_path"].astype(str).str.strip().ne("")]
 
@@ -40,7 +44,7 @@ def compute_speaker_similarity(
             generated = encode_audio_path(classifier, audio_path)
             reference = encode_audio_path(classifier, reference_audio)
             score = float(np.dot(generated, reference) / (np.linalg.norm(generated) * np.linalg.norm(reference)))
-            samples.loc[samples["sample_id"].eq(sample_id), "speaker_similarity"] = score
+            samples.loc[samples["sample_id"].eq(sample_id), "speaker_similarity"] = stringify_csv_value(score)
         except Exception as exc:  # pragma: no cover - runtime integration path
             samples.loc[samples["sample_id"].eq(sample_id), "failure_reason"] = str(exc)
 
@@ -78,7 +82,7 @@ def compute_nisqa(
     for _, row in subset.iterrows():
         score = score_map.get(Path(row["audio_path"]).as_posix())
         if score is not None:
-            samples.loc[samples["sample_id"].eq(row["sample_id"]), "nisqa"] = float(score)
+            samples.loc[samples["sample_id"].eq(row["sample_id"]), "nisqa"] = stringify_csv_value(float(score))
     samples = refresh_sample_status(samples)
     save_samples(samples, out_path)
     return samples
@@ -103,7 +107,7 @@ def compute_f0_rmse(samples_path: str | Path, out_path: str | Path, sample_rate:
             if limit == 0:
                 continue
             rmse = float(np.sqrt(np.mean((gen_f0[:limit] - ref_f0[:limit]) ** 2)))
-            samples.loc[samples["sample_id"].eq(row["sample_id"]), "f0_rmse"] = rmse
+            samples.loc[samples["sample_id"].eq(row["sample_id"]), "f0_rmse"] = stringify_csv_value(rmse)
         except Exception as exc:  # pragma: no cover - runtime integration path
             samples.loc[samples["sample_id"].eq(row["sample_id"]), "failure_reason"] = str(exc)
 

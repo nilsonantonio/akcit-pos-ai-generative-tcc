@@ -34,6 +34,12 @@ def save_samples(samples: pd.DataFrame, path: str | Path) -> None:
     samples.to_csv(path, index=False)
 
 
+def stringify_csv_value(value: object) -> str:
+    if pd.isna(value):
+        return ""
+    return str(value)
+
+
 def refresh_sample_status(samples: pd.DataFrame) -> pd.DataFrame:
     metric_columns = [
         "wer",

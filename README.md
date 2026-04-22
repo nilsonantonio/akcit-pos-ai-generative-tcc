@@ -78,10 +78,13 @@ python3 scripts/validate_manifest.py \
 
 ```bash
 python3 scripts/extract_speaker_embeddings.py \
+  --config configs/speecht5_minimal.yaml \
   --speaker-selection data/manifests/speaker_selection.csv \
   --out-index artifacts/embeddings/speaker_embeddings.csv \
   --out-dir artifacts/embeddings
 ```
+
+Esse passo prepara os embeddings consumidos pela sintese do SpeechT5. O `speaker_embedding_path` do `samples.csv` aponta para esses embeddings de sintese.
 
 8. Gere a matriz de execucao:
 
@@ -151,9 +154,12 @@ python3 scripts/compute_wer.py \
 
 ```bash
 python3 scripts/compute_speaker_similarity.py \
+  --config configs/speecht5_minimal.yaml \
   --samples artifacts/evaluation/samples.csv \
   --out artifacts/evaluation/samples.csv
 ```
+
+Esse passo usa o modelo de avaliacao configurado em `evaluation.speaker_similarity_model` e nao consome `speaker_embedding_path`.
 
 ```bash
 python3 scripts/compute_nisqa.py \
@@ -234,6 +240,8 @@ O arquivo `samples.csv` de avaliacao deve conter, no minimo:
 ```text
 sample_id,run_id,condition,speaker_id,prompt_id,text_variant,target_text,audio_path,reference_audio_path,speaker_embedding_path,model_name,run_started_at,run_finished_at,failure_reason,wer,speaker_similarity,nisqa,f0_rmse,rtf,train_gpu_hours,inference_seconds,cost_usd,status,lora_gate_status
 ```
+
+No `samples.csv`, `speaker_embedding_path` representa apenas o embedding de sintese usado pelo TTS.
 
 Campos extras sao permitidos. Use `asr_text` para armazenar a transcricao do Whisper antes de rodar `scripts/compute_wer.py`.
 

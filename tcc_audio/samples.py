@@ -60,6 +60,7 @@ def initialize_samples(
                 "target_text": run["target_text"],
                 "audio_path": str(audio_path),
                 "reference_audio_path": speaker_meta.get("reference_audio", ""),
+                # This field stores the embedding consumed by the TTS synthesis step.
                 "speaker_embedding_path": embedding_meta.get("speaker_embedding_path", ""),
                 "model_name": run.get("model_name", ""),
                 "status": "pending",
@@ -81,7 +82,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", required=True, help="Output samples.csv path.")
     parser.add_argument("--audio-base-dir", default="artifacts/audio")
     parser.add_argument("--speaker-selection", help="Optional speaker_selection.csv for reference_audio lookup.")
-    parser.add_argument("--speaker-embeddings", help="Optional speaker_embeddings.csv for embedding lookup.")
+    parser.add_argument("--speaker-embeddings", help="Optional TTS speaker_embeddings.csv for synthesis embedding lookup.")
     return parser
 
 

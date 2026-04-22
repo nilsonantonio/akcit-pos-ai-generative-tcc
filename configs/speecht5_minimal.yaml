@@ -6,7 +6,8 @@ project:
   compute_target: runpod_docker
   primary_model: microsoft/speecht5_tts
   vocoder_model: microsoft/speecht5_hifigan
-  speaker_embedding_model: speechbrain/spkrec-ecapa-voxceleb
+  tts_speaker_embedding_model: speechbrain/spkrec-xvect-voxceleb
+  tts_speaker_embedding_dim: 512
 
 data:
   adaptation_dataset: common_voice_pt
@@ -66,6 +67,7 @@ conditions:
     normalization_modes: [normalized]
 
 evaluation:
+  speaker_similarity_model: speechbrain/spkrec-ecapa-voxceleb
   asr:
     name: openai/whisper-small
     finetuned: false
@@ -98,4 +100,3 @@ deliverables:
   human_eval_summary: artifacts/evaluation/human_eval_summary.csv
   report_assets_dir: report_assets
   demo_dir: demo
-

@@ -8,6 +8,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from tcc_audio.config import (
+    load_experiment_config,
+    resolve_tts_speaker_embedding_dim,
+    resolve_tts_speaker_embedding_model,
+)
 from tcc_audio.io import ensure_parent_dir, read_csv
 from tcc_audio.speechbrain_compat import encode_audio_path, load_encoder_classifier
 
@@ -16,8 +21,13 @@ def extract_speaker_embeddings(
     speaker_selection_path: str | Path,
     out_index: str | Path,
     out_dir: str | Path,
-    model_name: str = "speechbrain/spkrec-ecapa-voxceleb",
+    config_path: str | Path | None = None,
+    model_name: str | None = None,
+    expected_dim: int | None = None,
 ) -> pd.DataFrame:
+    config = load_experiment_config(config_path)
+    resolved_model_name = model_name or resolve_tts_speaker_embedding_model(config)
+    resolved_expected_dim = expected_dim if expected_dim is not None else resolve_tts_speaker_embedding_dim(config)
     EncoderClassifier = load_encoder_classifier()
     selection = read_csv(speaker_selection_path)
     required = {"speaker_id", "reference_audio"}
@@ -25,7 +35,7 @@ def extract_speaker_embeddings(
     if missing:
         raise ValueError(f"Missing speaker selection columns: {', '.join(sorted(missing))}")
 
-    classifier = EncoderClassifier.from_hparams(source=model_name)
+    classifier = EncoderClassifier.from_hparams(source=resolved_model_name)
     rows: list[dict[str, object]] = []
     out_root = Path(out_dir)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -34,14 +44,20 @@ def extract_speaker_embeddings(
         speaker_id = row["speaker_id"]
         reference_audio = Path(row["reference_audio"])
         embedding = encode_audio_path(classifier, reference_audio)
+        if embedding.shape[0] != resolved_expected_dim:
+            raise ValueError(
+                f"Embedding model '{resolved_model_name}' produced {embedding.shape[0]} dims for {speaker_id}, "
+                f"but the TTS synthesis pipeline expects {resolved_expected_dim}-d speaker embeddings."
+            )
         embedding_path = out_root / f"{speaker_id}.npy"
         np.save(embedding_path, embedding)
         rows.append(
             {
                 "speaker_id": speaker_id,
                 "reference_audio_path": str(reference_audio),
+                # This path is consumed by SpeechT5 synthesis, not by speaker-similarity evaluation.
                 "speaker_embedding_path": str(embedding_path),
-                "embedding_model": model_name,
+                "embedding_model": resolved_model_name,
                 "embedding_dim": embedding.shape[0],
             }
         )
@@ -53,21 +69,25 @@ def extract_speaker_embeddings(
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Extract ECAPA speaker embeddings from reference audio.")
+    parser = argparse.ArgumentParser(description="Extract SpeechT5-compatible speaker embeddings from reference audio.")
+    parser.add_argument("--config", help="Optional experiment config used to resolve the TTS embedding model.")
     parser.add_argument("--speaker-selection", required=True, help="Path to speaker_selection.csv.")
     parser.add_argument("--out-index", required=True, help="Output CSV with embedding metadata.")
     parser.add_argument("--out-dir", required=True, help="Directory for .npy embedding files.")
-    parser.add_argument("--model-name", default="speechbrain/spkrec-ecapa-voxceleb")
+    parser.add_argument("--model-name", help="Override the TTS speaker embedding model from config.")
+    parser.add_argument("--expected-dim", type=int, help="Override the expected TTS embedding dimension from config.")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     frame = extract_speaker_embeddings(
+        config_path=args.config,
         speaker_selection_path=args.speaker_selection,
         out_index=args.out_index,
         out_dir=args.out_dir,
         model_name=args.model_name,
+        expected_dim=args.expected_dim,
     )
     print(f"Wrote {len(frame)} speaker embeddings to {args.out_index}")
     return 0
