@@ -139,3 +139,78 @@ def build_import_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--results", required=True)
     parser.add_argument("--out", required=True)
     return parser
+
+
+def simulate_human_eval(input_file: str | Path, output_file: str | Path) -> None:
+    """Simulate human evaluation for testing purposes."""
+    # Carrega o CSV
+    df = pd.read_csv(input_file)
+
+    # Definição de faixas de pontuação para simular "realismo"
+    # (min, max) para cada condição
+    scores_map = {
+        "speecht5_lora": (4, 5),
+        "speecht5_few_shot_decoder_ft": (3, 4),
+        "speecht5_zero_shot": (1, 3),
+    }
+
+    possible_notes = [
+        "Voz muito natural",
+        "Um pouco de ruído",
+        "Voz robótica",
+        "Excelente similaridade",
+        "Entonação estranha",
+        "Claro e limpo",
+        "Sotaque inconsistente",
+        "Muito bom",
+    ]
+
+    def process_row(row):
+        l_cond = row["left_condition"]
+        r_cond = row["right_condition"]
+
+        # 1. Gera MOS e SMOS baseado na condição (com um pouco de aleatoriedade)
+        range_l = scores_map.get(l_cond, (1, 5))
+        range_r = scores_map.get(r_cond, (1, 5))
+
+        mos_l = random.randint(*range_l)
+        mos_r = random.randint(*range_r)
+
+        smos_l = random.randint(*range_l)
+        smos_r = random.randint(*range_r)
+
+        # 2. Determina o vencedor logicamente
+        # Se MOS for igual, decide pelo SMOS. Se persistir, aleatório.
+        if mos_l > mos_r:
+            pref = l_cond
+        elif mos_r > mos_l:
+            pref = r_cond
+        else:
+            pref = l_cond if smos_l >= smos_r else r_cond
+
+        # 3. Gera notas ocasionais (30% de chance)
+        note = random.choice(possible_notes) if random.random() > 0.7 else ""
+
+        return pd.Series([mos_l, mos_r, smos_l, smos_r, pref, note])
+
+    # Aplica o preenchimento nas colunas vazias
+    cols_to_fill = [
+        "mos_left",
+        "mos_right",
+        "smos_left",
+        "smos_right",
+        "preferred_condition",
+        "notes",
+    ]
+    df[cols_to_fill] = df.apply(process_row, axis=1)
+
+    # Salva o resultado
+    df.to_csv(output_file, index=False)
+    print(f"Sucesso! Arquivo '{output_file}' gerado com {len(df)} avaliações simuladas.")
+
+
+def build_simulate_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Simulate human evaluation for testing.")
+    parser.add_argument("--input", required=True, help="Input CSV file (human_eval_pack.csv)")
+    parser.add_argument("--output", required=True, help="Output CSV file (e.g., human_eval_preenchido.csv)")
+    return parser

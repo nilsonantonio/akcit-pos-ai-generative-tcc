@@ -117,7 +117,8 @@ python3 scripts/run_speecht5_few_shot.py \
   --config configs/speecht5_minimal.yaml \
   --manifest data/manifests/data_manifest.csv \
   --samples artifacts/evaluation/samples.csv \
-  --checkpoint-dir artifacts/checkpoints/few_shot
+  --checkpoint-dir artifacts/checkpoints/few_shot \
+  --gpu-hourly-rate 0.0
 ```
 
 ```bash
@@ -125,7 +126,8 @@ python3 scripts/run_speecht5_lora.py \
   --config configs/speecht5_minimal.yaml \
   --manifest data/manifests/data_manifest.csv \
   --samples artifacts/evaluation/samples.csv \
-  --checkpoint-dir artifacts/checkpoints/lora
+  --checkpoint-dir artifacts/checkpoints/lora \
+  --gpu-hourly-rate 0.0
 ```
 
 Opcional:
@@ -134,6 +136,15 @@ Opcional:
 python3 scripts/run_parler_reference.py \
   --config configs/speecht5_minimal.yaml \
   --samples artifacts/evaluation/samples.csv
+```
+
+Se for necessario preencher custos de treino depois da execucao a partir de `run_started_at` e `run_finished_at`, use:
+
+```bash
+python3 scripts/backfill_training_costs.py \
+  --samples artifacts/evaluation/samples.csv \
+  --gpu-hourly-rate 0.0 \
+  --summary-out artifacts/evaluation/manual_training_costs_summary.csv
 ```
 
 11. Rode Whisper e calcule WER:

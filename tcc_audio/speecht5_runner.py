@@ -220,6 +220,12 @@ def run_condition_inference(
             samples.loc[samples["sample_id"].eq(sample_id), "failure_reason"] = ""
             samples.loc[samples["sample_id"].eq(sample_id), "inference_seconds"] = stringify_csv_value(inference_seconds)
             samples.loc[samples["sample_id"].eq(sample_id), "rtf"] = stringify_csv_value(rtf)
+            if condition_id == "speecht5_zero_shot":
+                sample_mask = samples["sample_id"].eq(sample_id)
+                if samples.loc[sample_mask, "train_gpu_hours"].astype(str).str.strip().eq("").all():
+                    samples.loc[sample_mask, "train_gpu_hours"] = stringify_csv_value(0.0)
+                if samples.loc[sample_mask, "cost_usd"].astype(str).str.strip().eq("").all():
+                    samples.loc[sample_mask, "cost_usd"] = stringify_csv_value(0.0)
             samples.loc[samples["sample_id"].eq(sample_id), "status"] = "generated"
             if condition_id == "speecht5_lora":
                 samples.loc[samples["sample_id"].eq(sample_id), "lora_gate_status"] = "stable_lora"
@@ -420,6 +426,7 @@ def _fine_tune(
         samples.loc[evaluation_rows.index, "model_name"] = config["project"]["primary_model"]
         if lora:
             samples.loc[evaluation_rows.index, "lora_gate_status"] = "stable_lora"
+        save_samples(samples, samples_path)
 
         run_condition_inference(
             config_path=config_path,
@@ -491,5 +498,10 @@ def build_arg_parser(condition_name: str) -> argparse.ArgumentParser:
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--max-steps", type=int, default=100)
     parser.add_argument("--per-device-batch-size", type=int, default=2)
-    parser.add_argument("--gpu-hourly-rate", type=float, default=0.0)
+    parser.add_argument(
+        "--gpu-hourly-rate",
+        type=float,
+        default=0.0,
+        help="GPU hourly rate used to estimate cost_usd during training-backed runs. Default: 0.0",
+    )
     return parser

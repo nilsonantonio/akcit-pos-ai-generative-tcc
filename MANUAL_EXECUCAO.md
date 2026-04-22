@@ -254,6 +254,7 @@ python3 scripts/run_speecht5_few_shot.py \
   --manifest data/manifests/data_manifest.csv \
   --samples artifacts/evaluation/samples.csv \
   --checkpoint-dir artifacts/checkpoints/few_shot \
+  --gpu-hourly-rate 0.0 \
   --max-steps 50
 
 # se `data_manifest.csv` foi gerado antes da coluna `target_text_speecht5`,
@@ -390,6 +391,7 @@ python3 scripts/run_speecht5_lora.py \
   --manifest data/manifests/data_manifest.csv \
   --samples artifacts/evaluation/samples.csv \
   --checkpoint-dir artifacts/checkpoints/lora \
+  --gpu-hourly-rate 0.0 \
   --max-steps 50
 
 # 9m
@@ -504,6 +506,15 @@ python3 scripts/run_speecht5_lora.py \
 # SpeechT5 LoRA pipeline completed  
 ```
 
+Se precisar preencher `train_gpu_hours` e `cost_usd` depois do treino usando `run_started_at` e `run_finished_at` do `samples.csv`, use:
+
+```bash
+python3 scripts/backfill_training_costs.py \
+  --samples artifacts/evaluation/samples.csv \
+  --gpu-hourly-rate 0.0 \
+  --summary-out artifacts/evaluation/manual_training_costs_summary.csv
+```
+
 Depois do piloto, rode as fases restantes:
 
 ```bash
@@ -591,8 +602,8 @@ python3 scripts/extract_speaker_embeddings.py --config configs/speecht5_minimal.
 python3 scripts/generate_run_matrix.py --config configs/speecht5_minimal.yaml --out artifacts/run_matrix.csv
 python3 scripts/init_samples.py --run-matrix artifacts/run_matrix.csv --speaker-selection data/manifests/speaker_selection.csv --speaker-embeddings artifacts/embeddings/speaker_embeddings.csv --out artifacts/evaluation/samples.csv
 python3 scripts/run_speecht5_zero_shot.py --config configs/speecht5_minimal.yaml --samples artifacts/evaluation/samples.csv
-python3 scripts/run_speecht5_few_shot.py --config configs/speecht5_minimal.yaml --manifest data/manifests/data_manifest.csv --samples artifacts/evaluation/samples.csv --checkpoint-dir artifacts/checkpoints/few_shot
-python3 scripts/run_speecht5_lora.py --config configs/speecht5_minimal.yaml --manifest data/manifests/data_manifest.csv --samples artifacts/evaluation/samples.csv --checkpoint-dir artifacts/checkpoints/lora
+python3 scripts/run_speecht5_few_shot.py --config configs/speecht5_minimal.yaml --manifest data/manifests/data_manifest.csv --samples artifacts/evaluation/samples.csv --checkpoint-dir artifacts/checkpoints/few_shot --gpu-hourly-rate 0.0
+python3 scripts/run_speecht5_lora.py --config configs/speecht5_minimal.yaml --manifest data/manifests/data_manifest.csv --samples artifacts/evaluation/samples.csv --checkpoint-dir artifacts/checkpoints/lora --gpu-hourly-rate 0.0
 python3 scripts/run_parler_reference.py --config configs/speecht5_minimal.yaml --samples artifacts/evaluation/samples.csv
 python3 scripts/run_whisper_batch.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
 python3 scripts/compute_wer.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
