@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Backfill train_gpu_hours and cost_usd from sample timestamps."""
+"""Backfill train_gpu_hours and cost_usd from saved training totals or sample timestamps."""
 
 import sys
 from pathlib import Path

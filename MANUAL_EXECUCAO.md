@@ -506,7 +506,7 @@ python3 scripts/run_speecht5_lora.py \
 # SpeechT5 LoRA pipeline completed  
 ```
 
-Se precisar preencher `train_gpu_hours` e `cost_usd` depois do treino usando `run_started_at` e `run_finished_at` do `samples.csv`, use:
+Se precisar preencher `train_gpu_hours` e `cost_usd` depois do treino, o backfill usa `total_train_gpu_hours` quando a coluna estiver salva no `samples.csv` e, na falta dela, cai para `run_started_at` e `run_finished_at`:
 
 ```bash
 python3 scripts/backfill_training_costs.py \
@@ -547,8 +547,12 @@ python3 scripts/build_human_eval_pack.py --samples artifacts/evaluation/samples.
 python3 scripts/import_human_eval_results.py --results artifacts/human_eval_pack/human_eval_pack.csv --out artifacts/evaluation/human_eval_summary.csv
 # Wrote 6 human evaluation summary rows to artifacts/evaluation/human_eval_summary.csv
 python3 scripts/aggregate_metrics.py --samples artifacts/evaluation/samples.csv --out-dir artifacts/evaluation
+# Wrote 40 metric summary rows and 3 cost summary rows
 python3 scripts/make_report_assets.py --samples artifacts/evaluation/samples.csv --metrics artifacts/evaluation/metrics_summary.csv --costs artifacts/evaluation/cost_summary.csv --human-eval artifacts/evaluation/human_eval_summary.csv --out-dir report_assets
+# Wrote 8 report asset files to report_assets
 python3 demo/app.py --samples artifacts/evaluation/samples.csv
+# * Running on local URL:  http://127.0.0.1:7860
+# * To create a public link, set `share=True` in `launch()`.
 ```
 
 ## 4. Runbook: Linux local com NVIDIA + Docker

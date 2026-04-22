@@ -12,6 +12,7 @@ SUMMARY_COLUMNS = [
     "speaker_id",
     "matched_rows",
     "timed_rows",
+    "total_train_gpu_hours_source",
     "filled_train_gpu_hours_cells",
     "filled_cost_usd_cells",
     "total_runtime_hours",
@@ -29,6 +30,16 @@ def _parse_timestamp(raw_value: object) -> datetime | None:
 
 def _stringify_csv_value(value: object) -> str:
     return "" if value is None else str(value)
+
+
+def _parse_float(raw_value: object) -> float | None:
+    value = str(raw_value).strip()
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"Invalid float value: {raw_value!r}") from exc
 
 
 def _load_rows(path: str | Path) -> tuple[list[dict[str, str]], list[str]]:
@@ -88,6 +99,12 @@ def backfill_training_costs(
 
     summary_rows: list[dict[str, object]] = []
     for (condition, speaker_id), indices in sorted(groups.items()):
+        saved_total_train_gpu_hours = None
+        for index in indices:
+            saved_total_train_gpu_hours = _parse_float(rows[index].get("total_train_gpu_hours", ""))
+            if saved_total_train_gpu_hours is not None:
+                break
+
         total_runtime_seconds = 0.0
         timed_rows = 0
         for index in indices:
@@ -99,11 +116,16 @@ def backfill_training_costs(
             total_runtime_seconds += max((finished_at - started_at).total_seconds(), 0.0)
             timed_rows += 1
 
-        if timed_rows == 0:
+        if saved_total_train_gpu_hours is None and timed_rows == 0:
             continue
 
         matched_rows = len(indices)
-        total_runtime_hours = total_runtime_seconds / 3600.0
+        if saved_total_train_gpu_hours is not None:
+            total_runtime_hours = saved_total_train_gpu_hours
+            total_train_gpu_hours_source = "saved_total_train_gpu_hours"
+        else:
+            total_runtime_hours = total_runtime_seconds / 3600.0
+            total_train_gpu_hours_source = "run_started_at/run_finished_at"
         train_gpu_hours_per_sample = total_runtime_hours / matched_rows
         cost_usd_per_sample = train_gpu_hours_per_sample * gpu_hourly_rate
 
@@ -111,6 +133,8 @@ def backfill_training_costs(
         filled_cost = 0
         for index in indices:
             row = rows[index]
+            if overwrite or (row.get("total_train_gpu_hours") or "").strip() == "":
+                row["total_train_gpu_hours"] = _stringify_csv_value(total_runtime_hours)
             if overwrite or (row.get("train_gpu_hours") or "").strip() == "":
                 row["train_gpu_hours"] = _stringify_csv_value(train_gpu_hours_per_sample)
                 filled_train += 1
@@ -124,6 +148,7 @@ def backfill_training_costs(
                 "speaker_id": speaker_id,
                 "matched_rows": matched_rows,
                 "timed_rows": timed_rows,
+                "total_train_gpu_hours_source": total_train_gpu_hours_source,
                 "filled_train_gpu_hours_cells": filled_train,
                 "filled_cost_usd_cells": filled_cost,
                 "total_runtime_hours": total_runtime_hours,
@@ -148,7 +173,10 @@ def backfill_training_costs(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Backfill train_gpu_hours and cost_usd from run_started_at/run_finished_at in samples.csv."
+        description=(
+            "Backfill train_gpu_hours and cost_usd from total_train_gpu_hours when present, "
+            "falling back to run_started_at/run_finished_at in samples.csv."
+        )
     )
     parser.add_argument("--samples", required=True, help="Path to artifacts/evaluation/samples.csv.")
     parser.add_argument(

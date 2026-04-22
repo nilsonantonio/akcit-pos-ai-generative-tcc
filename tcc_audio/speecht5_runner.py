@@ -222,6 +222,8 @@ def run_condition_inference(
             samples.loc[samples["sample_id"].eq(sample_id), "rtf"] = stringify_csv_value(rtf)
             if condition_id == "speecht5_zero_shot":
                 sample_mask = samples["sample_id"].eq(sample_id)
+                if samples.loc[sample_mask, "total_train_gpu_hours"].astype(str).str.strip().eq("").all():
+                    samples.loc[sample_mask, "total_train_gpu_hours"] = stringify_csv_value(0.0)
                 if samples.loc[sample_mask, "train_gpu_hours"].astype(str).str.strip().eq("").all():
                     samples.loc[sample_mask, "train_gpu_hours"] = stringify_csv_value(0.0)
                 if samples.loc[sample_mask, "cost_usd"].astype(str).str.strip().eq("").all():
@@ -421,6 +423,7 @@ def _fine_tune(
         ].copy()
         train_cost_share = elapsed_hours / max(len(evaluation_rows), 1)
         usd_share = train_cost_share * gpu_hourly_rate
+        samples.loc[evaluation_rows.index, "total_train_gpu_hours"] = stringify_csv_value(elapsed_hours)
         samples.loc[evaluation_rows.index, "train_gpu_hours"] = stringify_csv_value(train_cost_share)
         samples.loc[evaluation_rows.index, "cost_usd"] = stringify_csv_value(usd_share)
         samples.loc[evaluation_rows.index, "model_name"] = config["project"]["primary_model"]

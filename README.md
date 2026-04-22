@@ -138,7 +138,7 @@ python3 scripts/run_parler_reference.py \
   --samples artifacts/evaluation/samples.csv
 ```
 
-Se for necessario preencher custos de treino depois da execucao a partir de `run_started_at` e `run_finished_at`, use:
+Se for necessario preencher custos de treino depois da execucao, o backfill usa `total_train_gpu_hours` quando a coluna estiver salva no `samples.csv` e, na falta dela, cai para `run_started_at` e `run_finished_at`:
 
 ```bash
 python3 scripts/backfill_training_costs.py \
@@ -281,6 +281,7 @@ sample_id,run_id,condition,speaker_id,prompt_id,text_variant,target_text,audio_p
 No `samples.csv`, `speaker_embedding_path` representa apenas o embedding de sintese usado pelo TTS.
 
 Campos extras sao permitidos. Use `asr_text` para armazenar a transcricao do Whisper antes de rodar `scripts/compute_wer.py`.
+Quando disponivel, `total_train_gpu_hours` armazena o tempo total de treino por grupo `condition + speaker_id` e e usado pelo backfill de custos.
 
 ## Gate de LoRA
 

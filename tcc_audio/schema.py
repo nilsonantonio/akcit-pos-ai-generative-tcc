@@ -66,4 +66,5 @@ VALID_TEXT_VARIANTS = {"raw", "normalized"}
 SAMPLES_OPTIONAL_COLUMNS = [
     "asr_text",
     "human_eval_batch_id",
+    "total_train_gpu_hours",
 ]
