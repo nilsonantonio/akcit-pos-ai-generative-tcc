@@ -38,7 +38,13 @@ from tcc_audio.report_assets import make_report_assets
 from tcc_audio.samples import initialize_samples
 from tcc_audio.speaker_selection import select_speakers
 from tcc_audio.speaker_embeddings import extract_speaker_embeddings
-from tcc_audio.speecht5_runner import _load_speaker_embedding, _load_torch_stack, _load_training_stack
+from tcc_audio.speecht5_runner import (
+    _apply_lora_adapter,
+    _load_speaker_embedding,
+    _load_torch_stack,
+    _load_training_stack,
+)
+from tcc_audio.audio_metrics import _load_nisqa_predictor
 from tcc_audio.speecht5_text import count_unk_tokens, has_unk_tokens, normalize_text_for_speecht5
 from tcc_audio.wer import word_error_rate, compute_wer_from_asr
 
@@ -512,6 +518,162 @@ def test_speecht5_dataset_normalizes_legacy_manifest_text() -> None:
 
     assert item["input_ids"] == [44, 55]
     assert item["labels"].shape == (3, 80)
+
+
+def test_apply_lora_adapter_does_not_force_seq2seq_task_type() -> None:
+    calls: dict[str, object] = {}
+
+    class FakeConfig:
+        def __init__(self, **kwargs) -> None:
+            calls["kwargs"] = kwargs
+
+    def fake_get_peft_model(model, config):
+        calls["model"] = model
+        calls["config"] = config
+        return "wrapped-model"
+
+    with patch(
+        "tcc_audio.speecht5_runner._load_peft",
+        return_value=(FakeConfig, object(), fake_get_peft_model),
+    ):
+        wrapped = _apply_lora_adapter(object())
+
+    assert wrapped == "wrapped-model"
+    assert "task_type" not in calls["kwargs"]
+    assert calls["kwargs"]["target_modules"] == ["q_proj", "k_proj", "v_proj", "out_proj"]
+
+
+def test_load_nisqa_predictor_accepts_explicit_checkout_path(monkeypatch) -> None:
+    import importlib
+
+    with TemporaryDirectory() as tmpdir:
+        checkout_path = Path(tmpdir).resolve()
+
+        def fake_import_module(module_name: str):
+            if module_name == "nisqa.NISQA_model" and str(checkout_path) in sys.path:
+                return types.SimpleNamespace(nisqaModel="predictor")
+            raise ImportError(module_name)
+
+        monkeypatch.setattr(importlib, "import_module", fake_import_module)
+
+        predictor = _load_nisqa_predictor(nisqa_path=checkout_path)
+
+    assert predictor == "predictor"
+    assert str(checkout_path) in sys.path
+
+
+def test_load_nisqa_predictor_error_mentions_local_checkout(monkeypatch) -> None:
+    import importlib
+
+    monkeypatch.delenv("NISQA_PATH", raising=False)
+    monkeypatch.setattr(importlib, "import_module", lambda module_name: (_ for _ in ()).throw(ImportError(module_name)))
+
+    try:
+        _load_nisqa_predictor()
+    except SystemExit as exc:
+        assert "--nisqa-path" in str(exc)
+        assert "NISQA_PATH" in str(exc)
+    else:
+        raise AssertionError("expected NISQA loader to report local checkout guidance")
+
+
+def test_build_human_eval_pack_accepts_generated_rows() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        samples_path = tmp / "samples.csv"
+        left_audio = tmp / "left.wav"
+        right_audio = tmp / "right.wav"
+        third_audio = tmp / "third.wav"
+        left_audio.write_bytes(b"fake")
+        right_audio.write_bytes(b"fake")
+        third_audio.write_bytes(b"fake")
+        pd.DataFrame(
+            [
+                {
+                    "sample_id": "zs",
+                    "run_id": "zs",
+                    "condition": "speecht5_zero_shot",
+                    "speaker_id": "speaker_01",
+                    "prompt_id": "P001",
+                    "text_variant": "raw",
+                    "target_text": "Texto de teste.",
+                    "audio_path": str(left_audio),
+                    "reference_audio_path": "reference.wav",
+                    "speaker_embedding_path": "embedding.npy",
+                    "model_name": "microsoft/speecht5_tts",
+                    "run_started_at": "",
+                    "run_finished_at": "",
+                    "failure_reason": "",
+                    "wer": "",
+                    "speaker_similarity": "",
+                    "nisqa": "",
+                    "f0_rmse": "",
+                    "rtf": "",
+                    "train_gpu_hours": "",
+                    "inference_seconds": "",
+                    "cost_usd": "",
+                    "status": "generated",
+                    "lora_gate_status": "",
+                },
+                {
+                    "sample_id": "fs",
+                    "run_id": "fs",
+                    "condition": "speecht5_few_shot_decoder_ft",
+                    "speaker_id": "speaker_01",
+                    "prompt_id": "P001",
+                    "text_variant": "raw",
+                    "target_text": "Texto de teste.",
+                    "audio_path": str(right_audio),
+                    "reference_audio_path": "reference.wav",
+                    "speaker_embedding_path": "embedding.npy",
+                    "model_name": "microsoft/speecht5_tts",
+                    "run_started_at": "",
+                    "run_finished_at": "",
+                    "failure_reason": "",
+                    "wer": "",
+                    "speaker_similarity": "",
+                    "nisqa": "",
+                    "f0_rmse": "",
+                    "rtf": "",
+                    "train_gpu_hours": "",
+                    "inference_seconds": "",
+                    "cost_usd": "",
+                    "status": "generated",
+                    "lora_gate_status": "",
+                },
+                {
+                    "sample_id": "pending",
+                    "run_id": "pending",
+                    "condition": "speecht5_lora",
+                    "speaker_id": "speaker_01",
+                    "prompt_id": "P001",
+                    "text_variant": "raw",
+                    "target_text": "Texto de teste.",
+                    "audio_path": str(third_audio),
+                    "reference_audio_path": "reference.wav",
+                    "speaker_embedding_path": "embedding.npy",
+                    "model_name": "microsoft/speecht5_tts",
+                    "run_started_at": "",
+                    "run_finished_at": "",
+                    "failure_reason": "",
+                    "wer": "",
+                    "speaker_similarity": "",
+                    "nisqa": "",
+                    "f0_rmse": "",
+                    "rtf": "",
+                    "train_gpu_hours": "",
+                    "inference_seconds": "",
+                    "cost_usd": "",
+                    "status": "pending",
+                    "lora_gate_status": "",
+                },
+            ]
+        ).to_csv(samples_path, index=False)
+
+        pack = build_human_eval_pack(samples_path, tmp / "human_eval_pack")
+
+    assert len(pack) == 1
+    assert {pack.iloc[0]["left_sample_id"], pack.iloc[0]["right_sample_id"]} == {"zs", "fs"}
 
 
 def test_speecht5_text_normalization_and_unk_audit() -> None:

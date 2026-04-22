@@ -167,6 +167,32 @@ python3 scripts/compute_nisqa.py \
   --out artifacts/evaluation/samples.csv
 ```
 
+O NISQA nao faz parte deste repositorio. Antes desse passo, baixe o repositorio oficial localmente:
+
+```bash
+git clone https://github.com/gabrielmittag/NISQA.git
+```
+
+Se o pacote NISQA nao estiver instalado no ambiente ativo, aponte esse checkout local no comando:
+
+```bash
+python3 scripts/compute_nisqa.py \
+  --samples artifacts/evaluation/samples.csv \
+  --out artifacts/evaluation/samples.csv \
+  --nisqa-path /caminho/para/NISQA
+```
+
+Exemplo, se o clone foi feito na raiz do projeto:
+
+```bash
+python3 scripts/compute_nisqa.py \
+  --samples artifacts/evaluation/samples.csv \
+  --out artifacts/evaluation/samples.csv \
+  --nisqa-path "$(pwd)/NISQA"
+```
+
+Ou exporte `NISQA_PATH=/caminho/para/NISQA`.
+
 ```bash
 python3 scripts/compute_f0_rmse.py \
   --samples artifacts/evaluation/samples.csv \
@@ -183,7 +209,7 @@ python3 scripts/build_human_eval_pack.py \
 
 ```bash
 python3 scripts/import_human_eval_results.py \
-  --results data/evaluation/human_eval_results.csv \
+  --results artifacts/human_eval_pack/human_eval_pack.csv \
   --out artifacts/evaluation/human_eval_summary.csv
 ```
 

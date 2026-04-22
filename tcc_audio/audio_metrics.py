@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import importlib
+import os
+import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -53,34 +57,120 @@ def compute_speaker_similarity(
     return samples
 
 
-def _load_nisqa_predictor():
+def _iter_nisqa_search_roots(explicit_path: str | Path | None = None) -> list[Path]:
+    candidates: list[Path] = []
+    for raw_path in [
+        explicit_path,
+        os.environ.get("NISQA_PATH"),
+        Path.cwd() / "NISQA",
+        Path.cwd() / "third_party" / "NISQA",
+        Path.cwd() / "vendor" / "NISQA",
+    ]:
+        if not raw_path:
+            continue
+        path = Path(raw_path).expanduser().resolve()
+        if path.exists() and path not in candidates:
+            candidates.append(path)
+    return candidates
+
+
+def _load_nisqa_predictor(nisqa_path: str | Path | None = None):
     candidates = [
         ("nisqa.NISQA_model", "nisqaModel"),
         ("NISQA.nisqa.NISQA_model", "nisqaModel"),
     ]
-    for module_name, symbol in candidates:
-        try:
-            module = __import__(module_name, fromlist=[symbol])
-            return getattr(module, symbol)
-        except Exception:
-            continue
-    raise SystemExit("NISQA is not installed. Install a local NISQA package before running this metric.")
+
+    def _try_import():
+        for module_name, symbol in candidates:
+            try:
+                module = importlib.import_module(module_name)
+                return getattr(module, symbol)
+            except Exception:
+                continue
+        return None
+
+    predictor = _try_import()
+    if predictor is not None:
+        return predictor
+
+    for search_root in _iter_nisqa_search_roots(nisqa_path):
+        root_str = str(search_root)
+        if root_str not in sys.path:
+            sys.path.insert(0, root_str)
+        predictor = _try_import()
+        if predictor is not None:
+            return predictor
+
+    raise SystemExit(
+        "NISQA is not installed. Install it in the active environment or point to a local checkout with "
+        "`--nisqa-path /path/to/NISQA` or `NISQA_PATH=/path/to/NISQA` before running this metric."
+    )
+
+
+def _resolve_nisqa_root(nisqa_path: str | Path | None = None) -> Path:
+    roots = _iter_nisqa_search_roots(nisqa_path)
+    if not roots:
+        raise SystemExit(
+            "NISQA path not found. Pass `--nisqa-path /path/to/NISQA` or export `NISQA_PATH=/path/to/NISQA`."
+        )
+    return roots[0]
+
+
+def _resolve_nisqa_pretrained_model(nisqa_root: Path) -> Path:
+    model_path = nisqa_root / "weights" / "nisqa_tts.tar"
+    if not model_path.exists():
+        raise SystemExit(
+            f"NISQA checkpoint not found at `{model_path}`. The TTS naturalness model `weights/nisqa_tts.tar` is required."
+        )
+    return model_path
 
 
 def compute_nisqa(
     samples_path: str | Path,
     out_path: str | Path,
     batch_size: int = 4,
+    nisqa_path: str | Path | None = None,
 ) -> pd.DataFrame:
-    nisqaModel = _load_nisqa_predictor()
+    nisqaModel = _load_nisqa_predictor(nisqa_path=nisqa_path)
+    nisqa_root = _resolve_nisqa_root(nisqa_path=nisqa_path)
+    pretrained_model = _resolve_nisqa_pretrained_model(nisqa_root)
     samples = load_samples(samples_path)
     subset = samples[samples["audio_path"].astype(str).str.strip().ne("")]
     audio_paths = [path for path in subset["audio_path"].tolist() if Path(path).exists()]
-    predictor = nisqaModel()
-    scores = predictor.predict(audio_paths, bs=batch_size)
-    score_map = {Path(path).as_posix(): score for path, score in zip(audio_paths, scores)}
+    if not audio_paths:
+        samples = refresh_sample_status(samples)
+        save_samples(samples, out_path)
+        return samples
+
+    with tempfile.TemporaryDirectory(prefix="nisqa_predict_") as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        csv_path = tmpdir_path / "nisqa_input.csv"
+        result_dir = tmpdir_path / "results"
+        result_dir.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame({"audio_path": [str(Path(path).resolve()) for path in audio_paths]}).to_csv(csv_path, index=False)
+
+        predictor = nisqaModel(
+            {
+                "mode": "predict_csv",
+                "pretrained_model": str(pretrained_model),
+                "data_dir": "",
+                "csv_file": str(csv_path),
+                "csv_deg": "audio_path",
+                "output_dir": str(result_dir),
+                "tr_bs_val": batch_size,
+                "tr_num_workers": 0,
+                "ms_channel": None,
+            }
+        )
+        results = predictor.predict()
+
+    score_map = {
+        str(Path(row["audio_path"]).resolve().as_posix()): row["mos_pred"]
+        for _, row in results.iterrows()
+        if pd.notna(row.get("mos_pred"))
+    }
     for _, row in subset.iterrows():
-        score = score_map.get(Path(row["audio_path"]).as_posix())
+        score = score_map.get(Path(row["audio_path"]).resolve().as_posix())
         if score is not None:
             samples.loc[samples["sample_id"].eq(row["sample_id"]), "nisqa"] = stringify_csv_value(float(score))
     samples = refresh_sample_status(samples)

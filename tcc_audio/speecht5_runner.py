@@ -82,10 +82,10 @@ def _load_training_stack():
 
 def _load_peft():
     try:
-        from peft import LoraConfig, PeftModel, TaskType, get_peft_model
+        from peft import LoraConfig, PeftModel, get_peft_model
     except ImportError as exc:
         raise SystemExit("PEFT is required for SpeechT5 LoRA. Install with requirements-gpu.txt.") from exc
-    return LoraConfig, PeftModel, TaskType, get_peft_model
+    return LoraConfig, PeftModel, get_peft_model
 
 
 @dataclass
@@ -187,7 +187,7 @@ def run_condition_inference(
         checkpoint_path = Path(checkpoint_dir)
         if checkpoint_path.exists():
             try:
-                LoraConfig, PeftModel, _, _ = _load_peft()
+                _, PeftModel, _ = _load_peft()
                 context.model = PeftModel.from_pretrained(context.model, str(checkpoint_path))
                 context.model.to(next(context.vocoder.parameters()).device)
             except Exception:
@@ -308,6 +308,20 @@ def _freeze_for_decoder_finetune(model) -> int:
     return trainable
 
 
+def _apply_lora_adapter(model):
+    LoraConfig, _, get_peft_model = _load_peft()
+    peft_config = LoraConfig(
+        # SpeechT5ForTextToSpeech does not accept the generic seq2seq `inputs_embeds`
+        # argument that PEFT injects when `task_type=SEQ_2_SEQ_LM`.
+        r=16,
+        lora_alpha=32,
+        lora_dropout=0.05,
+        target_modules=["q_proj", "k_proj", "v_proj", "out_proj"],
+        bias="none",
+    )
+    return get_peft_model(model, peft_config)
+
+
 def _prepare_speaker_embedding_map(embedding_index_path: str | Path) -> dict[str, str]:
     index = EmbeddingIndex.load(embedding_index_path)
     mapping: dict[str, str] = {}
@@ -349,16 +363,7 @@ def _fine_tune(
 
         model = stack["SpeechT5ForTextToSpeech"].from_pretrained(config["project"]["primary_model"])
         if lora:
-            LoraConfig, _, TaskType, get_peft_model = _load_peft()
-            peft_config = LoraConfig(
-                task_type=TaskType.SEQ_2_SEQ_LM,
-                r=16,
-                lora_alpha=32,
-                lora_dropout=0.05,
-                target_modules=["q_proj", "k_proj", "v_proj", "out_proj"],
-                bias="none",
-            )
-            model = get_peft_model(model, peft_config)
+            model = _apply_lora_adapter(model)
         else:
             _freeze_for_decoder_finetune(model)
 

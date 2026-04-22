@@ -26,7 +26,8 @@ def build_human_eval_pack(
 ) -> pd.DataFrame:
     rng = random.Random(seed)
     samples = read_csv(samples_path)
-    samples = samples[samples["status"].astype(str).str.lower().eq("ok")].copy()
+    valid_statuses = {"generated", "ok"}
+    samples = samples[samples["status"].astype(str).str.lower().isin(valid_statuses)].copy()
     out_root = Path(out_dir)
     audio_dir = out_root / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
@@ -84,6 +85,14 @@ def build_human_eval_pack(
 
 
 def import_human_eval_results(results_path: str | Path, out_path: str | Path) -> pd.DataFrame:
+    results_path = Path(results_path)
+    if not results_path.exists():
+        raise SystemExit(
+            f"Human evaluation results file not found: `{results_path}`. "
+            "Fill either `artifacts/human_eval_pack/human_eval_pack.csv` or "
+            "`data/evaluation/human_eval_results_template.csv`, then pass that filled CSV to "
+            "`scripts/import_human_eval_results.py --results ...`."
+        )
     results = read_csv(results_path)
     summary_rows: list[dict[str, object]] = []
 
@@ -130,4 +139,3 @@ def build_import_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--results", required=True)
     parser.add_argument("--out", required=True)
     return parser
-

@@ -10,12 +10,17 @@ from tcc_audio.audio_metrics import build_arg_parser, compute_nisqa
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_arg_parser("NISQA").parse_args(argv)
-    compute_nisqa(args.samples, args.out)
+    args = build_nisqa_arg_parser().parse_args(argv)
+    compute_nisqa(args.samples, args.out, nisqa_path=args.nisqa_path)
     print(f"Updated NISQA in {args.out}")
     return 0
 
 
+def build_nisqa_arg_parser():
+    parser = build_arg_parser("NISQA")
+    parser.add_argument("--nisqa-path", help="Local path to a NISQA checkout or package root.")
+    return parser
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
-

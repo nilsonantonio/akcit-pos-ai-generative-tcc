@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${PROJECT_ROOT}"
+
 python3 - <<'PY'
 import sys
 
@@ -18,6 +22,17 @@ PY
 
 python3 -m pip install --upgrade pip
 python3 -m pip install -r requirements-linux-gpu.txt
+
+if ! command -v git >/dev/null 2>&1; then
+  echo "git nao encontrado. Instale git para baixar o checkout local do NISQA." >&2
+  exit 1
+fi
+
+if [ ! -d "${PROJECT_ROOT}/NISQA/nisqa" ]; then
+  git clone https://github.com/gabrielmittag/NISQA.git "${PROJECT_ROOT}/NISQA"
+else
+  echo "NISQA ja presente em ${PROJECT_ROOT}/NISQA"
+fi
 
 if ! command -v ffmpeg >/dev/null 2>&1; then
   echo "ffmpeg nao encontrado. Instale via apt/yum no host ou use o container NVIDIA." >&2
@@ -43,4 +58,4 @@ PY
 
 python3 -B tests/smoke_test.py extended
 
-echo "Bootstrap Linux NVIDIA finalizado."
+echo "Bootstrap Linux NVIDIA finalizado. NISQA disponivel em ${PROJECT_ROOT}/NISQA"
