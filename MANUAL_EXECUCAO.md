@@ -538,6 +538,9 @@ python3 scripts/compute_f0_rmse.py --samples artifacts/evaluation/samples.csv --
 python3 scripts/build_human_eval_pack.py --samples artifacts/evaluation/samples.csv --out-dir artifacts/human_eval_pack
 # Wrote 288 human evaluation rows to artifacts/human_eval_pack
 
+# OPCIONAL: Para fins de teste e desenvolvimento, voce pode simular votos humanos:
+python3 scripts/simulate_human_eval.py --input artifacts/human_eval_pack/human_eval_pack.csv --output artifacts/human_eval_pack/human_eval_pack.csv
+
 # preencha artifacts/human_eval_pack/human_eval_pack.csv linha a linha ouvindo o par de audios de cada batch_id
 # editar apenas: mos_left, mos_right, smos_left, smos_right, preferred_condition, notes
 # mos_* = naturalidade/qualidade percebida; smos_* = similaridade com a voz esperada; usar preferencialmente notas de 1 a 5

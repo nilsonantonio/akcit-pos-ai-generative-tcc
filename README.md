@@ -219,6 +219,13 @@ python3 scripts/build_human_eval_pack.py \
 ```
 
 ```bash
+# Opcional: Simular votos humanos para teste
+python3 scripts/simulate_human_eval.py \
+  --input artifacts/human_eval_pack/human_eval_pack.csv \
+  --output artifacts/human_eval_pack/human_eval_pack.csv
+```
+
+```bash
 python3 scripts/import_human_eval_results.py \
   --results artifacts/human_eval_pack/human_eval_pack.csv \
   --out artifacts/evaluation/human_eval_summary.csv
