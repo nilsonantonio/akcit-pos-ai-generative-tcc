@@ -537,16 +537,6 @@ python3 scripts/compute_f0_rmse.py --samples artifacts/evaluation/samples.csv --
 # Updated F0 RMSE in artifacts/evaluation/samples.csv
 python3 scripts/build_human_eval_pack.py --samples artifacts/evaluation/samples.csv --out-dir artifacts/human_eval_pack
 # Wrote 288 human evaluation rows to artifacts/human_eval_pack
-
-# OPCIONAL: Para fins de teste e desenvolvimento, voce pode simular votos humanos:
-python3 scripts/simulate_human_eval.py --input artifacts/human_eval_pack/human_eval_pack.csv --output artifacts/human_eval_pack/human_eval_pack.csv
-
-# preencha artifacts/human_eval_pack/human_eval_pack.csv linha a linha ouvindo o par de audios de cada batch_id
-# editar apenas: mos_left, mos_right, smos_left, smos_right, preferred_condition, notes
-# mos_* = naturalidade/qualidade percebida; smos_* = similaridade com a voz esperada; usar preferencialmente notas de 1 a 5
-# preferred_condition deve receber exatamente o valor de left_condition ou right_condition
-# nao altere: batch_id, prompt_id, speaker_id, left_sample_id, right_sample_id, left_condition, right_condition
-
 python3 scripts/import_human_eval_results.py --results artifacts/human_eval_pack/human_eval_pack.csv --out artifacts/evaluation/human_eval_summary.csv
 # Wrote 6 human evaluation summary rows to artifacts/evaluation/human_eval_summary.csv
 python3 scripts/aggregate_metrics.py --samples artifacts/evaluation/samples.csv --out-dir artifacts/evaluation
@@ -556,6 +546,54 @@ python3 scripts/make_report_assets.py --samples artifacts/evaluation/samples.csv
 python3 demo/app.py --samples artifacts/evaluation/samples.csv
 # * Running on local URL:  http://127.0.0.1:7860
 # * To create a public link, set `share=True` in `launch()`.
+```
+
+### Como preencher `artifacts/human_eval_pack/human_eval_pack.csv`
+
+O arquivo `artifacts/human_eval_pack/human_eval_pack.csv` e um formulario de comparacao pareada A/B. Cada linha representa um `batch_id` com dois audios:
+
+- `left_sample_id` e `right_sample_id`
+- `left_condition` e `right_condition`
+
+As colunas de identificacao nao devem ser alteradas:
+
+- `batch_id`
+- `prompt_id`
+- `speaker_id`
+- `left_sample_id`
+- `right_sample_id`
+- `left_condition`
+- `right_condition`
+
+As colunas que devem ser preenchidas pelo avaliador sao:
+
+- `mos_left`
+- `mos_right`
+- `smos_left`
+- `smos_right`
+- `preferred_condition`
+- `notes`
+
+Interpretacao recomendada:
+
+- `mos_left` e `mos_right`: naturalidade/qualidade percebida do audio da esquerda e da direita, preferencialmente em escala de `1` a `5`
+- `smos_left` e `smos_right`: similaridade com a voz esperada do locutor, tambem preferencialmente em escala de `1` a `5`
+- `preferred_condition`: preencher exatamente com o valor de `left_condition` ou `right_condition`, conforme a preferencia do avaliador
+- `notes`: campo livre para observacoes como artefatos, instabilidade, sotaque, pausas inadequadas ou baixa inteligibilidade
+
+Exemplo de preenchimento de uma linha:
+
+```csv
+batch_id,prompt_id,speaker_id,left_sample_id,right_sample_id,left_condition,right_condition,mos_left,mos_right,smos_left,smos_right,preferred_condition,notes
+batch_0001,P001,speaker_01,audio_a,audio_b,speecht5_zero_shot,speecht5_lora,3,4,3,5,speecht5_lora,mais natural e mais proximo da voz alvo
+```
+
+Para testes e desenvolvimento, o projeto tambem oferece uma simulacao automatica:
+
+```bash
+python3 scripts/simulate_human_eval.py \
+  --input artifacts/human_eval_pack/human_eval_pack.csv \
+  --output artifacts/human_eval_pack/human_eval_pack.csv
 ```
 
 ## 4. Runbook: Linux local com NVIDIA + Docker
