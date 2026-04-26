@@ -24,34 +24,88 @@ data:
   speaker_embeddings_index: artifacts/embeddings/speaker_embeddings.csv
 
 conditions:
-  - id: speecht5_zero_shot
-    label: SpeechT5 zero-shot
-    regime: zero_shot
-    model_name: microsoft/speecht5_tts
-    trainable: false
-    uses_speaker_embeddings: true
-    normalization_modes: [raw, normalized]
-  - id: speecht5_few_shot_decoder_ft
-    label: SpeechT5 few-shot decoder fine-tune
-    regime: few_shot_adaptation
-    model_name: microsoft/speecht5_tts
-    trainable: true
-    minutes_per_speaker: 20
-    train_strategy: decoder_postnet_ft
-    uses_speaker_embeddings: true
-    normalization_modes: [normalized]
-  - id: speecht5_lora
-    label: SpeechT5 LoRA
+  - id: speecht5_lora_conservative
+    label: SpeechT5 LoRA Conservative
     regime: light_finetune
     model_name: microsoft/speecht5_tts
     trainable: true
     minutes_per_speaker: 20
     train_strategy: lora
     uses_speaker_embeddings: true
-    lora_gate:
-      preferred: lora_qkvo
-      fallback: decoder_postnet_ft
     normalization_modes: [normalized]
+    lora:
+      r: 16
+      lora_alpha: 32
+      lora_dropout: 0.05
+      bias: none
+      target_modules: [q_proj, k_proj, v_proj, out_proj]
+      init_lora_weights: true
+      use_rslora: false
+    training:
+      scope: per_speaker
+      max_steps: 1500
+      learning_rate: 3.0e-5
+      warmup_ratio: 0.05
+      lr_scheduler_type: cosine
+      per_device_train_batch_size: 2
+      gradient_accumulation_steps: 2
+      effective_batch_size: 4
+      per_device_eval_batch_size: 2
+      fp16: false
+      gradient_checkpointing: true
+      max_grad_norm: 1.0
+      weight_decay: 0.01
+      evaluation_strategy: steps
+      eval_steps: 500
+      save_strategy: steps
+      save_steps: 500
+      save_total_limit: 3
+      logging_strategy: steps
+      logging_steps: 50
+      load_best_model_at_end: true
+      metric_for_best_model: eval_loss
+      greater_is_better: false
+  - id: speecht5_lora_unique
+    label: SpeechT5 LoRA Unique
+    regime: light_finetune
+    model_name: microsoft/speecht5_tts
+    trainable: true
+    minutes_per_speaker: 20
+    train_strategy: lora
+    uses_speaker_embeddings: true
+    normalization_modes: [normalized]
+    lora:
+      r: 8
+      lora_alpha: 16
+      lora_dropout: 0.05
+      bias: none
+      target_modules: [q_proj, k_proj, v_proj, out_proj]
+      init_lora_weights: true
+      use_rslora: false
+    training:
+      scope: unique
+      max_steps: 1000
+      learning_rate: 5.0e-5
+      warmup_ratio: 0.05
+      lr_scheduler_type: cosine
+      per_device_train_batch_size: 2
+      gradient_accumulation_steps: 2
+      effective_batch_size: 4
+      per_device_eval_batch_size: 2
+      fp16: false
+      gradient_checkpointing: false
+      max_grad_norm: 1.0
+      weight_decay: 0.01
+      evaluation_strategy: steps
+      eval_steps: 500
+      save_strategy: steps
+      save_steps: 500
+      save_total_limit: 3
+      logging_strategy: steps
+      logging_steps: 50
+      load_best_model_at_end: true
+      metric_for_best_model: eval_loss
+      greater_is_better: false
 
 evaluation:
   speaker_similarity_model: speechbrain/spkrec-ecapa-voxceleb

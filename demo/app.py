@@ -8,16 +8,26 @@ from pathlib import Path
 
 import pandas as pd
 
+from tcc_audio.runtime import load_samples
+
 
 def _load_samples(path: str | Path) -> pd.DataFrame:
-    samples = pd.read_csv(path, dtype=str, keep_default_na=False)
+    samples = load_samples(path).fillna("")
     samples = samples[samples["status"].str.lower().eq("ok")].copy()
+    checkpoint_label = samples["checkpoint_label"].astype(str).str.strip()
+    samples["analysis_condition"] = checkpoint_label.where(checkpoint_label.ne(""), samples["condition"].astype(str))
     return samples
 
 
 def _format_metrics(row: pd.Series) -> str:
     metric_names = ["wer", "speaker_similarity", "nisqa", "f0_rmse", "rtf", "cost_usd"]
-    lines = [f"**{row['condition']}**", f"Prompt: `{row['prompt_id']}`", f"Speaker: `{row['speaker_id']}`"]
+    lines = [
+        f"**{row['analysis_condition']}**",
+        f"Prompt: `{row['prompt_id']}`",
+        f"Speaker: `{row['speaker_id']}`",
+    ]
+    if str(row.get("checkpoint_run_ts", "")).strip():
+        lines.append(f"Run TS: `{row['checkpoint_run_ts']}`")
     for metric in metric_names:
         if metric in row and str(row[metric]).strip():
             lines.append(f"- `{metric}`: {row[metric]}")
@@ -36,7 +46,7 @@ def build_app(samples_path: str | Path):
 
     prompt_ids = sorted(samples["prompt_id"].unique())
     speaker_ids = sorted(samples["speaker_id"].unique())
-    conditions = sorted(samples["condition"].unique())
+    conditions = sorted(samples["analysis_condition"].unique())
 
     def select_samples(prompt_id: str, speaker_id: str, condition_a: str, condition_b: str, condition_c: str):
         selected = []
@@ -44,7 +54,7 @@ def build_app(samples_path: str | Path):
             rows = samples[
                 samples["prompt_id"].eq(prompt_id)
                 & samples["speaker_id"].eq(speaker_id)
-                & samples["condition"].eq(condition)
+                & samples["analysis_condition"].eq(condition)
             ]
             if rows.empty:
                 selected.append((None, f"No sample found for `{condition}`."))
@@ -62,7 +72,7 @@ def build_app(samples_path: str | Path):
         )
 
     with gr.Blocks(title="TCC Audio PT-BR Demo") as app:
-        gr.Markdown("# TCC Audio PT-BR Demo\nComparacao A/B/C de amostras e metricas.")
+        gr.Markdown("# TCC Audio PT-BR Demo\nComparacao A/B/C entre checkpoints LoRA e metricas.")
         with gr.Row():
             prompt = gr.Dropdown(prompt_ids, value=prompt_ids[0], label="Prompt")
             speaker = gr.Dropdown(speaker_ids, value=speaker_ids[0], label="Speaker")
@@ -106,4 +116,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -1,21 +1,31 @@
-"""SpeechT5 training and inference helpers for the TCC pipeline."""
+"""SpeechT5 LoRA training and inference helpers for the TCC pipeline."""
 
 from __future__ import annotations
 
 import argparse
 import inspect
 import math
+import os
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable, Mapping
 
 import numpy as np
 import pandas as pd
 
 from tcc_audio.io import ensure_parent_dir, read_csv, read_yaml
-from tcc_audio.runtime import EmbeddingIndex, load_samples, now_utc_iso, refresh_sample_status, save_samples, stringify_csv_value
+from tcc_audio.runtime import (
+    EmbeddingIndex,
+    load_samples,
+    now_utc_iso,
+    refresh_sample_status,
+    save_samples,
+    stringify_csv_value,
+)
+from tcc_audio.samples import materialize_checkpoint_samples, reset_condition_checkpoint_rows
 from tcc_audio.speecht5_text import normalize_text_for_speecht5
 
 
@@ -25,15 +35,9 @@ def _load_torch_stack():
         import soundfile as sf
         import torch
         from torch.utils.data import Dataset
-        from transformers import (
-            SpeechT5ForTextToSpeech,
-            SpeechT5HifiGan,
-            SpeechT5Processor,
-        )
+        from transformers import SpeechT5ForTextToSpeech, SpeechT5HifiGan, SpeechT5Processor
     except ImportError as exc:
-        raise SystemExit(
-            "Missing SpeechT5 runtime dependencies. Install with requirements-gpu.txt."
-        ) from exc
+        raise SystemExit("Missing SpeechT5 runtime dependencies. Install with requirements-gpu.txt.") from exc
     return {
         "librosa": librosa,
         "sf": sf,
@@ -59,10 +63,10 @@ def _ensure_lzma_available() -> None:
         else:
             hint = "Reinstale o Python com suporte a `xz/liblzma` e recrie o ambiente virtual."
         raise SystemExit(
-            "SpeechT5 few-shot/LoRA training requires Python stdlib `lzma` support (`_lzma`). "
+            "SpeechT5 LoRA training requires Python stdlib `lzma` support (`_lzma`). "
             f"Current interpreter: {sys.executable}. "
             f"{hint} "
-            "Validate with `python3 -c \"import lzma, _lzma\"`."
+            'Validate with `python3 -c "import lzma, _lzma"`.'
         ) from exc
 
 
@@ -72,9 +76,7 @@ def _load_training_stack():
     try:
         from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments
     except ImportError as exc:
-        raise SystemExit(
-            "Missing SpeechT5 training dependencies. Install with requirements-gpu.txt."
-        ) from exc
+        raise SystemExit("Missing SpeechT5 training dependencies. Install with requirements-gpu.txt.") from exc
     stack["Seq2SeqTrainer"] = Seq2SeqTrainer
     stack["Seq2SeqTrainingArguments"] = Seq2SeqTrainingArguments
     return stack
@@ -97,24 +99,49 @@ class SpeechT5Context:
     sf: object
 
 
-def load_speecht5_context(model_name: str, vocoder_name: str, device: str | None = None) -> SpeechT5Context:
-    stack = _load_torch_stack()
-    torch = stack["torch"]
-    processor = stack["SpeechT5Processor"].from_pretrained(model_name)
-    model = stack["SpeechT5ForTextToSpeech"].from_pretrained(model_name)
-    vocoder = stack["SpeechT5HifiGan"].from_pretrained(vocoder_name)
-    selected_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(selected_device)
-    vocoder.to(selected_device)
-    model.eval()
-    vocoder.eval()
-    return SpeechT5Context(
-        processor=processor,
-        model=model,
-        vocoder=vocoder,
-        torch=torch,
-        sf=stack["sf"],
-    )
+@dataclass
+class CheckpointRecord:
+    condition_id: str
+    checkpoint_step: int
+    checkpoint_path: Path
+    checkpoint_run_ts: str
+    training_scope: str
+    training_unit: str
+    total_train_gpu_hours: float
+
+
+def _path_safe_utc_timestamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _resolve_lora_conditions(
+    config: Mapping[str, Any], selected_condition_ids: Iterable[str] | None = None
+) -> list[Mapping[str, Any]]:
+    selected = {value for value in (selected_condition_ids or []) if str(value).strip()}
+    conditions = []
+    for condition in config.get("conditions", []):
+        if not isinstance(condition, Mapping):
+            continue
+        train_strategy = str(condition.get("train_strategy", "")).strip().lower()
+        if train_strategy != "lora" and "lora" not in condition:
+            continue
+        condition_id = str(condition["id"])
+        if selected and condition_id not in selected:
+            continue
+        conditions.append(condition)
+    if selected:
+        found = {str(condition["id"]) for condition in conditions}
+        missing = sorted(selected.difference(found))
+        if missing:
+            raise ValueError(f"Unknown LoRA condition ids: {', '.join(missing)}")
+    return conditions
+
+
+def _training_scope(condition: Mapping[str, Any]) -> str:
+    scope = str(condition.get("training", {}).get("scope", "per_speaker")).strip().lower()
+    if scope not in {"per_speaker", "unique"}:
+        raise ValueError(f"Unsupported training.scope for `{condition['id']}`: {scope}")
+    return scope
 
 
 def _load_embedding(path: str | Path) -> np.ndarray:
@@ -136,6 +163,26 @@ def _load_speaker_embedding(path: str | Path, expected_dim: int | None = None) -
     return embedding
 
 
+def load_speecht5_context(model_name: str, vocoder_name: str, device: str | None = None) -> SpeechT5Context:
+    stack = _load_torch_stack()
+    torch = stack["torch"]
+    processor = stack["SpeechT5Processor"].from_pretrained(model_name)
+    model = stack["SpeechT5ForTextToSpeech"].from_pretrained(model_name)
+    vocoder = stack["SpeechT5HifiGan"].from_pretrained(vocoder_name)
+    selected_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(selected_device)
+    vocoder.to(selected_device)
+    model.eval()
+    vocoder.eval()
+    return SpeechT5Context(
+        processor=processor,
+        model=model,
+        vocoder=vocoder,
+        torch=torch,
+        sf=stack["sf"],
+    )
+
+
 def generate_speech_to_file(
     context: SpeechT5Context,
     text: str,
@@ -148,9 +195,9 @@ def generate_speech_to_file(
     device = next(context.model.parameters()).device
     input_ids = inputs["input_ids"].to(device)
     expected_dim = int(getattr(context.model.config, "speaker_embedding_dim", 512))
-    speaker_embeddings = torch.tensor(
-        _load_speaker_embedding(speaker_embedding_path, expected_dim=expected_dim)
-    ).to(device)
+    speaker_embeddings = torch.tensor(_load_speaker_embedding(speaker_embedding_path, expected_dim=expected_dim)).to(
+        device
+    )
 
     started = time.perf_counter()
     with torch.no_grad():
@@ -172,7 +219,8 @@ def run_condition_inference(
     config_path: str | Path,
     samples_path: str | Path,
     condition_id: str,
-    checkpoint_dir: str | Path | None = None,
+    checkpoint_dir: str | Path,
+    sample_ids: Iterable[str] | None = None,
     speaker_id: str | None = None,
     limit: int | None = None,
 ) -> pd.DataFrame:
@@ -183,21 +231,17 @@ def run_condition_inference(
         vocoder_name=config["project"]["vocoder_model"],
     )
 
-    if checkpoint_dir:
-        checkpoint_path = Path(checkpoint_dir)
-        if checkpoint_path.exists():
-            try:
-                _, PeftModel, _ = _load_peft()
-                context.model = PeftModel.from_pretrained(context.model, str(checkpoint_path))
-                context.model.to(next(context.vocoder.parameters()).device)
-            except Exception:
-                # Few-shot checkpoints may be full-model checkpoints.
-                stack = _load_torch_stack()
-                context.model = stack["SpeechT5ForTextToSpeech"].from_pretrained(str(checkpoint_path))
-                context.model.to(next(context.vocoder.parameters()).device)
-            context.model.eval()
+    checkpoint_path = Path(checkpoint_dir)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint path not found: {checkpoint_path}")
+    _, PeftModel, _ = _load_peft()
+    context.model = PeftModel.from_pretrained(context.model, str(checkpoint_path))
+    context.model.to(next(context.vocoder.parameters()).device)
+    context.model.eval()
 
     subset = samples[samples["condition"].eq(condition_id)].copy()
+    if sample_ids is not None:
+        subset = subset[subset["sample_id"].isin(list(sample_ids))].copy()
     if speaker_id:
         subset = subset[subset["speaker_id"].eq(speaker_id)].copy()
     if limit:
@@ -214,28 +258,21 @@ def run_condition_inference(
                 output_path=row["audio_path"],
                 sample_rate=int(config["data"].get("sample_rate", 16000)),
             )
-            samples.loc[samples["sample_id"].eq(sample_id), "model_name"] = row["model_name"] or condition_id
-            samples.loc[samples["sample_id"].eq(sample_id), "run_started_at"] = started_at
-            samples.loc[samples["sample_id"].eq(sample_id), "run_finished_at"] = now_utc_iso()
-            samples.loc[samples["sample_id"].eq(sample_id), "failure_reason"] = ""
-            samples.loc[samples["sample_id"].eq(sample_id), "inference_seconds"] = stringify_csv_value(inference_seconds)
-            samples.loc[samples["sample_id"].eq(sample_id), "rtf"] = stringify_csv_value(rtf)
-            if condition_id == "speecht5_zero_shot":
-                sample_mask = samples["sample_id"].eq(sample_id)
-                if samples.loc[sample_mask, "total_train_gpu_hours"].astype(str).str.strip().eq("").all():
-                    samples.loc[sample_mask, "total_train_gpu_hours"] = stringify_csv_value(0.0)
-                if samples.loc[sample_mask, "train_gpu_hours"].astype(str).str.strip().eq("").all():
-                    samples.loc[sample_mask, "train_gpu_hours"] = stringify_csv_value(0.0)
-                if samples.loc[sample_mask, "cost_usd"].astype(str).str.strip().eq("").all():
-                    samples.loc[sample_mask, "cost_usd"] = stringify_csv_value(0.0)
-            samples.loc[samples["sample_id"].eq(sample_id), "status"] = "generated"
-            if condition_id == "speecht5_lora":
-                samples.loc[samples["sample_id"].eq(sample_id), "lora_gate_status"] = "stable_lora"
+            sample_mask = samples["sample_id"].eq(sample_id)
+            samples.loc[sample_mask, "model_name"] = row["checkpoint_label"] or row["model_name"] or condition_id
+            samples.loc[sample_mask, "run_started_at"] = started_at
+            samples.loc[sample_mask, "run_finished_at"] = now_utc_iso()
+            samples.loc[sample_mask, "failure_reason"] = ""
+            samples.loc[sample_mask, "inference_seconds"] = stringify_csv_value(inference_seconds)
+            samples.loc[sample_mask, "rtf"] = stringify_csv_value(rtf)
+            samples.loc[sample_mask, "status"] = "generated"
+            samples.loc[sample_mask, "lora_gate_status"] = "stable_lora"
         except Exception as exc:  # pragma: no cover - runtime integration path
-            samples.loc[samples["sample_id"].eq(sample_id), "run_started_at"] = started_at
-            samples.loc[samples["sample_id"].eq(sample_id), "run_finished_at"] = now_utc_iso()
-            samples.loc[samples["sample_id"].eq(sample_id), "failure_reason"] = str(exc)
-            samples.loc[samples["sample_id"].eq(sample_id), "status"] = "failed"
+            sample_mask = samples["sample_id"].eq(sample_id)
+            samples.loc[sample_mask, "run_started_at"] = started_at
+            samples.loc[sample_mask, "run_finished_at"] = now_utc_iso()
+            samples.loc[sample_mask, "failure_reason"] = str(exc)
+            samples.loc[sample_mask, "status"] = "failed"
 
     samples = refresh_sample_status(samples)
     save_samples(samples, samples_path)
@@ -306,27 +343,31 @@ def _make_collator(processor, model):
     return collate
 
 
-def _freeze_for_decoder_finetune(model) -> int:
-    trainable = 0
-    allowed = ("speech_decoder", "speech_decoder_prenet", "speech_decoder_postnet", "postnet")
-    for name, parameter in model.named_parameters():
-        parameter.requires_grad = any(token in name for token in allowed)
-        if parameter.requires_grad:
-            trainable += parameter.numel()
-    return trainable
+def _filter_supported_kwargs(
+    kwargs: Mapping[str, Any],
+    supported_fields: Iterable[str],
+) -> dict[str, Any]:
+    supported = set(supported_fields)
+    return {key: value for key, value in kwargs.items() if key in supported}
 
 
-def _apply_lora_adapter(model):
+def _apply_lora_adapter(model, lora_config: Mapping[str, Any] | None = None):
     LoraConfig, _, get_peft_model = _load_peft()
-    peft_config = LoraConfig(
-        # SpeechT5ForTextToSpeech does not accept the generic seq2seq `inputs_embeds`
-        # argument that PEFT injects when `task_type=SEQ_2_SEQ_LM`.
-        r=16,
-        lora_alpha=32,
-        lora_dropout=0.05,
-        target_modules=["q_proj", "k_proj", "v_proj", "out_proj"],
-        bias="none",
-    )
+    signature = inspect.signature(LoraConfig.__init__)
+    kwargs = {
+        "r": 16,
+        "lora_alpha": 32,
+        "lora_dropout": 0.05,
+        "target_modules": ["q_proj", "k_proj", "v_proj", "out_proj"],
+        "bias": "none",
+        "init_lora_weights": True,
+        "use_rslora": False,
+    }
+    if lora_config:
+        kwargs.update(dict(lora_config))
+    if not any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in signature.parameters.values()):
+        kwargs = _filter_supported_kwargs(kwargs, signature.parameters)
+    peft_config = LoraConfig(**kwargs)
     return get_peft_model(model, peft_config)
 
 
@@ -338,133 +379,237 @@ def _prepare_speaker_embedding_map(embedding_index_path: str | Path) -> dict[str
     return mapping
 
 
-def _fine_tune(
-    config_path: str | Path,
-    manifest_path: str | Path,
-    samples_path: str | Path,
-    condition_id: str,
-    checkpoint_dir: str | Path,
-    lora: bool = False,
-    learning_rate: float = 1e-4,
-    max_steps: int = 100,
-    per_device_batch_size: int = 2,
-    gpu_hourly_rate: float = 0.0,
-) -> pd.DataFrame:
-    config = read_yaml(config_path)
-    manifest = read_csv(manifest_path)
-    samples = load_samples(samples_path)
-    sample_rate = int(config["data"].get("sample_rate", 16000))
-    stack = _load_training_stack()
-    torch = stack["torch"]
-    processor = stack["SpeechT5Processor"].from_pretrained(config["project"]["primary_model"])
-    speaker_embedding_map = _prepare_speaker_embedding_map(config["data"]["speaker_embeddings_index"])
-    DatasetClass = _build_dataset(manifest, speaker_embedding_map, sample_rate)
+def _iter_training_units(
+    train_rows: pd.DataFrame,
+    val_rows: pd.DataFrame,
+    scope: str,
+) -> list[tuple[str, pd.DataFrame, pd.DataFrame]]:
+    if scope == "unique":
+        return [("unique", train_rows.copy(), val_rows.copy())]
 
-    train_rows = manifest[manifest["split"].eq("train")].copy()
-    val_rows = manifest[manifest["split"].eq("val")].copy()
-
+    units = []
     for speaker_id in sorted(train_rows["speaker_id"].unique()):
         speaker_train = train_rows[train_rows["speaker_id"].eq(speaker_id)].copy()
         speaker_val = val_rows[val_rows["speaker_id"].eq(speaker_id)].copy()
         if speaker_train.empty:
             continue
+        units.append((str(speaker_id), speaker_train, speaker_val))
+    return units
 
-        model = stack["SpeechT5ForTextToSpeech"].from_pretrained(config["project"]["primary_model"])
-        if lora:
-            model = _apply_lora_adapter(model)
-        else:
-            _freeze_for_decoder_finetune(model)
 
-        output_dir = Path(checkpoint_dir) / condition_id / speaker_id
-        output_dir.mkdir(parents=True, exist_ok=True)
+def _build_checkpoint_root(checkpoint_dir: str | Path, condition_id: str, run_ts: str, training_unit: str) -> Path:
+    return Path(checkpoint_dir) / condition_id / run_ts / training_unit
 
-        training_args_kwargs = {
-            "output_dir": str(output_dir),
-            "per_device_train_batch_size": per_device_batch_size,
-            "per_device_eval_batch_size": per_device_batch_size,
-            "learning_rate": learning_rate,
-            "max_steps": max_steps,
-            "save_strategy": "steps",
-            "save_steps": max(10, max_steps // 5),
-            "eval_steps": max(10, max_steps // 5),
-            "logging_steps": max(5, max_steps // 10),
-            "load_best_model_at_end": False,
-            "report_to": [],
-            "fp16": torch.cuda.is_available(),
-            "dataloader_pin_memory": torch.cuda.is_available(),
-        }
-        if "eval_strategy" in stack["Seq2SeqTrainingArguments"].__dataclass_fields__:
-            training_args_kwargs["eval_strategy"] = "steps"
-        else:
-            training_args_kwargs["evaluation_strategy"] = "steps"
-        training_args = stack["Seq2SeqTrainingArguments"](**training_args_kwargs)
 
-        trainer_kwargs = {
-            "model": model,
-            "args": training_args,
-            "train_dataset": DatasetClass(speaker_train, processor),
-            "eval_dataset": DatasetClass(speaker_val, processor) if not speaker_val.empty else None,
-            "data_collator": _make_collator(processor, model),
-        }
-        trainer_signature = inspect.signature(stack["Seq2SeqTrainer"].__init__)
-        if "processing_class" in trainer_signature.parameters:
-            trainer_kwargs["processing_class"] = processor
-        else:
-            trainer_kwargs["tokenizer"] = processor
-        trainer = stack["Seq2SeqTrainer"](**trainer_kwargs)
+def _checkpoint_dirs(output_dir: str | Path) -> list[Path]:
+    checkpoints = []
+    for path in Path(output_dir).iterdir():
+        if not path.is_dir() or not path.name.startswith("checkpoint-"):
+            continue
+        try:
+            int(path.name.split("-", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        checkpoints.append(path)
+    return sorted(checkpoints, key=lambda path: int(path.name.split("-", 1)[1]))
 
-        started = time.perf_counter()
-        trainer.train()
-        elapsed_hours = (time.perf_counter() - started) / 3600
-        trainer.save_model()
 
-        evaluation_rows = samples[
-            samples["condition"].eq(condition_id) & samples["speaker_id"].eq(speaker_id)
-        ].copy()
-        train_cost_share = elapsed_hours / max(len(evaluation_rows), 1)
-        usd_share = train_cost_share * gpu_hourly_rate
-        samples.loc[evaluation_rows.index, "total_train_gpu_hours"] = stringify_csv_value(elapsed_hours)
-        samples.loc[evaluation_rows.index, "train_gpu_hours"] = stringify_csv_value(train_cost_share)
-        samples.loc[evaluation_rows.index, "cost_usd"] = stringify_csv_value(usd_share)
-        samples.loc[evaluation_rows.index, "model_name"] = config["project"]["primary_model"]
-        if lora:
-            samples.loc[evaluation_rows.index, "lora_gate_status"] = "stable_lora"
-        save_samples(samples, samples_path)
+def _checkpoint_step(checkpoint_path: str | Path) -> int:
+    name = Path(checkpoint_path).name
+    return int(name.split("-", 1)[1])
 
-        run_condition_inference(
-            config_path=config_path,
-            samples_path=samples_path,
-            condition_id=condition_id,
-            checkpoint_dir=output_dir,
-            speaker_id=speaker_id,
+
+def _validate_effective_batch_size(training_config: Mapping[str, Any]) -> None:
+    if "effective_batch_size" not in training_config:
+        return
+    world_size = max(int(os.environ.get("WORLD_SIZE", "1")), 1)
+    expected = (
+        int(training_config.get("per_device_train_batch_size", 1))
+        * int(training_config.get("gradient_accumulation_steps", 1))
+        * world_size
+    )
+    configured = int(training_config["effective_batch_size"])
+    if configured != expected:
+        raise ValueError(
+            "training.effective_batch_size mismatch: "
+            f"configured={configured}, derived={expected} for WORLD_SIZE={world_size}."
         )
-        samples = load_samples(samples_path)
-
-    return samples
 
 
-def run_few_shot_pipeline(
+def _build_training_args(
+    stack: Mapping[str, Any],
+    output_dir: str | Path,
+    training_config: Mapping[str, Any],
+    has_eval_dataset: bool,
+):
+    torch = stack["torch"]
+    fields = stack["Seq2SeqTrainingArguments"].__dataclass_fields__
+    _validate_effective_batch_size(training_config)
+
+    fp16_requested = bool(training_config.get("fp16", False))
+    if fp16_requested and not torch.cuda.is_available():
+        print("Warning: training.fp16=true ignored because CUDA is not available.")
+
+    kwargs: dict[str, Any] = {
+        "output_dir": str(output_dir),
+        "per_device_train_batch_size": int(training_config.get("per_device_train_batch_size", 2)),
+        "per_device_eval_batch_size": int(training_config.get("per_device_eval_batch_size", 2)),
+        "gradient_accumulation_steps": int(training_config.get("gradient_accumulation_steps", 1)),
+        "learning_rate": float(training_config.get("learning_rate", 5e-5)),
+        "warmup_ratio": float(training_config.get("warmup_ratio", 0.0)),
+        "lr_scheduler_type": training_config.get("lr_scheduler_type", "linear"),
+        "max_steps": int(training_config.get("max_steps", 100)),
+        "save_strategy": training_config.get("save_strategy", "steps"),
+        "save_steps": int(training_config.get("save_steps", 100)),
+        "logging_strategy": training_config.get("logging_strategy", "steps"),
+        "logging_steps": int(training_config.get("logging_steps", 10)),
+        "load_best_model_at_end": bool(training_config.get("load_best_model_at_end", False)),
+        "metric_for_best_model": training_config.get("metric_for_best_model", "eval_loss"),
+        "greater_is_better": bool(training_config.get("greater_is_better", False)),
+        "weight_decay": float(training_config.get("weight_decay", 0.0)),
+        "max_grad_norm": float(training_config.get("max_grad_norm", 1.0)),
+        "gradient_checkpointing": bool(training_config.get("gradient_checkpointing", False)),
+        "report_to": [],
+        "fp16": bool(torch.cuda.is_available() and fp16_requested),
+        "dataloader_pin_memory": bool(torch.cuda.is_available()),
+    }
+
+    if training_config.get("save_total_limit") not in (None, ""):
+        print(
+            "Warning: training.save_total_limit is ignored because checkpoint-level evaluation "
+            "preserves every checkpoint saved during the run."
+        )
+
+    if has_eval_dataset:
+        eval_strategy_value = training_config.get("eval_strategy", training_config.get("evaluation_strategy", "steps"))
+        kwargs["eval_steps"] = int(training_config.get("eval_steps", kwargs["save_steps"]))
+        if "eval_strategy" in fields:
+            kwargs["eval_strategy"] = eval_strategy_value
+        else:
+            kwargs["evaluation_strategy"] = eval_strategy_value
+    else:
+        kwargs["load_best_model_at_end"] = False
+        if "eval_strategy" in fields:
+            kwargs["eval_strategy"] = "no"
+        else:
+            kwargs["evaluation_strategy"] = "no"
+
+    if not has_eval_dataset and bool(training_config.get("load_best_model_at_end", False)):
+        print("Warning: load_best_model_at_end ignored because the selected training unit has no validation rows.")
+
+    filtered = _filter_supported_kwargs(kwargs, fields)
+    return stack["Seq2SeqTrainingArguments"](**filtered)
+
+
+def _build_trainer(
+    stack: Mapping[str, Any],
+    model: object,
+    training_args: object,
+    processor: object,
+    train_dataset: object,
+    eval_dataset: object | None,
+):
+    trainer_kwargs = {
+        "model": model,
+        "args": training_args,
+        "train_dataset": train_dataset,
+        "eval_dataset": eval_dataset,
+        "data_collator": _make_collator(processor, model),
+    }
+    trainer_signature = inspect.signature(stack["Seq2SeqTrainer"].__init__)
+    if "processing_class" in trainer_signature.parameters:
+        trainer_kwargs["processing_class"] = processor
+    else:
+        trainer_kwargs["tokenizer"] = processor
+    return stack["Seq2SeqTrainer"](**trainer_kwargs)
+
+
+def _train_condition(
     config_path: str | Path,
     manifest_path: str | Path,
     samples_path: str | Path,
     checkpoint_dir: str | Path,
-    learning_rate: float = 1e-4,
-    max_steps: int = 100,
-    per_device_batch_size: int = 2,
-    gpu_hourly_rate: float = 0.0,
+    condition: Mapping[str, Any],
+    gpu_hourly_rate: float,
+    audio_base_dir: str | Path,
 ) -> pd.DataFrame:
-    return _fine_tune(
-        config_path=config_path,
-        manifest_path=manifest_path,
-        samples_path=samples_path,
-        condition_id="speecht5_few_shot_decoder_ft",
-        checkpoint_dir=checkpoint_dir,
-        lora=False,
-        learning_rate=learning_rate,
-        max_steps=max_steps,
-        per_device_batch_size=per_device_batch_size,
-        gpu_hourly_rate=gpu_hourly_rate,
-    )
+    config = read_yaml(config_path)
+    manifest = read_csv(manifest_path)
+    condition_id = str(condition["id"])
+    training_scope = _training_scope(condition)
+    training_config = dict(condition.get("training", {}))
+    lora_config = dict(condition.get("lora", {}))
+    run_ts = _path_safe_utc_timestamp()
+
+    train_rows = manifest[manifest["split"].eq("train")].copy()
+    val_rows = manifest[manifest["split"].eq("val")].copy()
+
+    samples = reset_condition_checkpoint_rows(load_samples(samples_path), condition_id)
+    save_samples(samples, samples_path)
+
+    sample_rate = int(config["data"].get("sample_rate", 16000))
+    stack = _load_training_stack()
+    processor = stack["SpeechT5Processor"].from_pretrained(config["project"]["primary_model"])
+    speaker_embedding_map = _prepare_speaker_embedding_map(config["data"]["speaker_embeddings_index"])
+    dataset_class = _build_dataset(manifest, speaker_embedding_map, sample_rate)
+
+    for training_unit, unit_train_rows, unit_val_rows in _iter_training_units(train_rows, val_rows, training_scope):
+        model = stack["SpeechT5ForTextToSpeech"].from_pretrained(config["project"]["primary_model"])
+        model = _apply_lora_adapter(model, lora_config)
+
+        output_dir = _build_checkpoint_root(checkpoint_dir, condition_id, run_ts, training_unit)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        training_args = _build_training_args(
+            stack=stack,
+            output_dir=output_dir,
+            training_config=training_config,
+            has_eval_dataset=not unit_val_rows.empty,
+        )
+        trainer = _build_trainer(
+            stack=stack,
+            model=model,
+            training_args=training_args,
+            processor=processor,
+            train_dataset=dataset_class(unit_train_rows, processor),
+            eval_dataset=dataset_class(unit_val_rows, processor) if not unit_val_rows.empty else None,
+        )
+
+        started = time.perf_counter()
+        trainer.train()
+        elapsed_hours = (time.perf_counter() - started) / 3600.0
+        trainer.save_model()
+
+        checkpoints = _checkpoint_dirs(output_dir)
+        if not checkpoints:
+            print(f"Warning: no checkpoints were saved for `{condition_id}` training unit `{training_unit}`.")
+            continue
+
+        for checkpoint in checkpoints:
+            checkpoint_step = _checkpoint_step(checkpoint)
+            sample_ids = materialize_checkpoint_samples(
+                samples_path=samples_path,
+                condition_id=condition_id,
+                checkpoint_step=checkpoint_step,
+                checkpoint_path=checkpoint,
+                checkpoint_run_ts=run_ts,
+                training_scope=training_scope,
+                training_unit=training_unit,
+                audio_base_dir=audio_base_dir,
+                total_train_gpu_hours=elapsed_hours,
+                gpu_hourly_rate=gpu_hourly_rate,
+            )
+            if not sample_ids:
+                continue
+            run_condition_inference(
+                config_path=config_path,
+                samples_path=samples_path,
+                condition_id=condition_id,
+                checkpoint_dir=checkpoint,
+                sample_ids=sample_ids,
+            )
+
+    return load_samples(samples_path)
 
 
 def run_lora_pipeline(
@@ -472,39 +617,46 @@ def run_lora_pipeline(
     manifest_path: str | Path,
     samples_path: str | Path,
     checkpoint_dir: str | Path,
-    learning_rate: float = 5e-5,
-    max_steps: int = 100,
-    per_device_batch_size: int = 2,
     gpu_hourly_rate: float = 0.0,
+    condition_ids: Iterable[str] | None = None,
+    audio_base_dir: str | Path = "artifacts/audio",
 ) -> pd.DataFrame:
-    return _fine_tune(
-        config_path=config_path,
-        manifest_path=manifest_path,
-        samples_path=samples_path,
-        condition_id="speecht5_lora",
-        checkpoint_dir=checkpoint_dir,
-        lora=True,
-        learning_rate=learning_rate,
-        max_steps=max_steps,
-        per_device_batch_size=per_device_batch_size,
-        gpu_hourly_rate=gpu_hourly_rate,
-    )
+    config = read_yaml(config_path)
+    conditions = _resolve_lora_conditions(config, condition_ids)
+    if not conditions:
+        raise ValueError("No LoRA conditions found in the experiment config.")
+
+    for condition in conditions:
+        _train_condition(
+            config_path=config_path,
+            manifest_path=manifest_path,
+            samples_path=samples_path,
+            checkpoint_dir=checkpoint_dir,
+            condition=condition,
+            gpu_hourly_rate=gpu_hourly_rate,
+            audio_base_dir=audio_base_dir,
+        )
+    return load_samples(samples_path)
 
 
-def build_arg_parser(condition_name: str) -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=f"Run the {condition_name} SpeechT5 pipeline.")
+def build_lora_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run the SpeechT5 LoRA checkpoint-evaluation pipeline.")
     parser.add_argument("--config", required=True)
     parser.add_argument("--samples", required=True)
-    parser.add_argument("--manifest")
-    parser.add_argument("--checkpoint-dir")
-    parser.add_argument("--limit", type=int)
-    parser.add_argument("--learning-rate", type=float, default=1e-4)
-    parser.add_argument("--max-steps", type=int, default=100)
-    parser.add_argument("--per-device-batch-size", type=int, default=2)
+    parser.add_argument("--manifest", required=True)
+    parser.add_argument("--checkpoint-dir", required=True)
+    parser.add_argument("--audio-base-dir", default="artifacts/audio")
+    parser.add_argument(
+        "--condition",
+        action="append",
+        default=[],
+        help="LoRA condition id to run. Repeat the flag to select multiple conditions. "
+        "If omitted, all LoRA conditions are executed sequentially.",
+    )
     parser.add_argument(
         "--gpu-hourly-rate",
         type=float,
         default=0.0,
-        help="GPU hourly rate used to estimate cost_usd during training-backed runs. Default: 0.0",
+        help="GPU hourly rate used to estimate cost_usd for each checkpoint-evaluated training unit.",
     )
     return parser

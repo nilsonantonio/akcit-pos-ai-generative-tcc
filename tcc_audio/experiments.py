@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any, Mapping
 
 import pandas as pd
 
@@ -14,10 +15,26 @@ def _bool_series(df: pd.DataFrame, column: str) -> pd.Series:
     return df[column].astype(str).str.lower().eq("true")
 
 
+def _training_scope(condition: Mapping[str, Any]) -> str:
+    return str(condition.get("training", {}).get("scope", "per_speaker"))
+
+
+def _iter_lora_conditions(config: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    conditions = config.get("conditions", [])
+    output = []
+    for condition in conditions:
+        if not isinstance(condition, Mapping):
+            continue
+        train_strategy = str(condition.get("train_strategy", "")).strip().lower()
+        if train_strategy == "lora" or "lora" in condition:
+            output.append(condition)
+    return output
+
+
 def generate_run_matrix(config_path: str | Path, out_path: str | Path | None = None) -> pd.DataFrame:
     config = read_yaml(config_path)
     data_config = config.get("data", {})
-    conditions = config.get("conditions", [])
+    conditions = _iter_lora_conditions(config)
     prompts_path = data_config.get("prompts_path")
     if not prompts_path:
         raise ValueError("Config must define data.prompts_path")
@@ -72,6 +89,7 @@ def generate_run_matrix(config_path: str | Path, out_path: str | Path | None = N
                             "seed": config.get("project", {}).get("seed", ""),
                             "lora_gate_preferred": condition.get("lora_gate", {}).get("preferred", ""),
                             "lora_gate_fallback": condition.get("lora_gate", {}).get("fallback", ""),
+                            "training_scope": _training_scope(condition),
                         }
                     )
 

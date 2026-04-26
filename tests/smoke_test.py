@@ -39,7 +39,8 @@ from tcc_audio.experiments import generate_run_matrix
 from tcc_audio.evaluation import aggregate_metrics
 from tcc_audio.manifest import validate_data_manifest, validate_prompts
 from tcc_audio.report_assets import make_report_assets
-from tcc_audio.samples import initialize_samples
+from tcc_audio.runtime import load_samples
+from tcc_audio.samples import initialize_samples, materialize_checkpoint_samples, reset_condition_checkpoint_rows
 from tcc_audio.speaker_selection import select_speakers
 from tcc_audio.speaker_embeddings import extract_speaker_embeddings
 from tcc_audio.speecht5_runner import (
@@ -47,6 +48,7 @@ from tcc_audio.speecht5_runner import (
     _load_speaker_embedding,
     _load_torch_stack,
     _load_training_stack,
+    build_lora_arg_parser,
 )
 from tcc_audio.speecht5_text import count_unk_tokens, has_unk_tokens, normalize_text_for_speecht5
 from tcc_audio.wer import word_error_rate, compute_wer_from_asr
@@ -135,15 +137,12 @@ def test_run_matrix_generation() -> None:
         out = Path(tmpdir) / "run_matrix.csv"
         matrix = generate_run_matrix(ROOT / "configs/speecht5_minimal.yaml", out)
         assert out.exists()
-        assert {"speecht5_zero_shot", "speecht5_few_shot_decoder_ft", "speecht5_lora"}.issubset(
-            set(matrix["condition"])
-        )
         assert set(matrix["condition"]) == {
-            "speecht5_zero_shot",
-            "speecht5_few_shot_decoder_ft",
-            "speecht5_lora",
+            "speecht5_lora_conservative",
+            "speecht5_lora_unique",
         }
-        assert len(matrix) == 384
+        assert set(matrix["training_scope"]) == {"per_speaker", "unique"}
+        assert len(matrix) == 192
         speaker_selection = Path(tmpdir) / "speaker_selection.csv"
         embeddings = Path(tmpdir) / "speaker_embeddings.csv"
         pd.DataFrame(
@@ -174,6 +173,146 @@ def test_run_matrix_generation() -> None:
         assert "asr_text" in samples.columns
         assert "reference_audio_path" in samples.columns
         assert "speaker_embedding_path" in samples.columns
+        assert "checkpoint_step" in samples.columns
+        assert samples["audio_path"].astype(str).str.strip().eq("").all()
+
+
+def test_lora_run_matrix_supports_raw_and_normalized_modes() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        prompts = tmp / "prompts.csv"
+        config = tmp / "config.yaml"
+        prompts.write_text(
+            "prompt_id,category,raw_text,normalized_text,include_prompt_subexperiment,include_commercial_subset\n"
+            "P001,general,\"Texto cru\",\"Texto normalizado\",true,true\n",
+            encoding="utf-8",
+        )
+        config.write_text(
+            "project:\n"
+            "  seed: 42\n"
+            "data:\n"
+            "  prompts_path: " + str(prompts) + "\n"
+            "  speaker_target_count: 1\n"
+            "conditions:\n"
+            "  - id: lora_text_modes\n"
+            "    label: LoRA Text Modes\n"
+            "    train_strategy: lora\n"
+            "    normalization_modes: [raw, normalized]\n"
+            "    training:\n"
+            "      scope: unique\n"
+            "    lora:\n"
+            "      r: 8\n",
+            encoding="utf-8",
+        )
+        matrix = generate_run_matrix(config)
+
+    assert len(matrix) == 2
+    assert set(matrix["text_variant"]) == {"raw", "normalized"}
+    assert set(matrix["condition"]) == {"lora_text_modes"}
+
+
+def test_materialize_checkpoint_samples_expands_rows_per_checkpoint() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        run_matrix_path = tmp / "run_matrix.csv"
+        samples_path = tmp / "samples.csv"
+        speaker_selection = tmp / "speaker_selection.csv"
+        embeddings = tmp / "speaker_embeddings.csv"
+
+        pd.DataFrame(
+            [
+                {
+                    "run_id": "lora_cond__speaker_01__P001__normalized",
+                    "condition": "lora_cond",
+                    "condition_label": "LoRA Cond",
+                    "regime": "light_finetune",
+                    "model_name": "microsoft/speecht5_tts",
+                    "train_strategy": "lora",
+                    "uses_speaker_embeddings": True,
+                    "official_hypothesis_arm": True,
+                    "speaker_id": "speaker_01",
+                    "prompt_id": "P001",
+                    "category": "general",
+                    "text_variant": "normalized",
+                    "target_text": "Texto normalizado.",
+                    "training_scope": "per_speaker",
+                }
+            ]
+        ).to_csv(run_matrix_path, index=False)
+        pd.DataFrame([{"speaker_id": "speaker_01", "reference_audio": "reference.wav"}]).to_csv(
+            speaker_selection, index=False
+        )
+        pd.DataFrame([{"speaker_id": "speaker_01", "speaker_embedding_path": "embedding.npy"}]).to_csv(
+            embeddings, index=False
+        )
+
+        initialize_samples(
+            run_matrix_path,
+            samples_path,
+            speaker_selection_path=speaker_selection,
+            speaker_embeddings_path=embeddings,
+        )
+        sample_ids = materialize_checkpoint_samples(
+            samples_path=samples_path,
+            condition_id="lora_cond",
+            checkpoint_step=500,
+            checkpoint_path=tmp / "checkpoints/lora_cond/20260426T010203Z/speaker_01/checkpoint-500",
+            checkpoint_run_ts="20260426T010203Z",
+            training_scope="per_speaker",
+            training_unit="speaker_01",
+            audio_base_dir=tmp / "audio",
+            total_train_gpu_hours=1.5,
+            gpu_hourly_rate=2.0,
+        )
+        materialized = load_samples(samples_path)
+
+    assert sample_ids == ["lora_cond__speaker_01__P001__normalized__20260426T010203Z__step500"]
+    assert len(materialized) == 2
+    checkpoint_rows = materialized[materialized["checkpoint_step"].astype(str).str.strip().ne("")]
+    assert len(checkpoint_rows) == 1
+    row = checkpoint_rows.iloc[0]
+    assert row["checkpoint_label"] == "lora_cond@step500"
+    assert row["training_scope"] == "per_speaker"
+    assert row["training_unit"] == "speaker_01"
+    assert row["audio_path"].endswith("step_500/P001__normalized.wav")
+    assert float(row["train_gpu_hours"]) == 1.5
+    assert float(row["cost_usd"]) == 3.0
+
+
+def test_reset_condition_checkpoint_rows_keeps_base_rows_only() -> None:
+    frame = pd.DataFrame(
+        [
+            {"condition": "lora_cond", "checkpoint_step": "", "sample_id": "base"},
+            {"condition": "lora_cond", "checkpoint_step": "500", "sample_id": "materialized"},
+            {"condition": "other_cond", "checkpoint_step": "500", "sample_id": "other"},
+        ]
+    )
+
+    cleaned = reset_condition_checkpoint_rows(frame, "lora_cond")
+
+    assert cleaned["sample_id"].tolist() == ["base", "other"]
+
+
+def test_build_lora_arg_parser_accepts_repeated_condition_flags() -> None:
+    parser = build_lora_arg_parser()
+    args = parser.parse_args(
+        [
+            "--config",
+            "config.yaml",
+            "--samples",
+            "samples.csv",
+            "--manifest",
+            "manifest.csv",
+            "--checkpoint-dir",
+            "artifacts/checkpoints",
+            "--condition",
+            "cond_a",
+            "--condition",
+            "cond_b",
+        ]
+    )
+
+    assert args.condition == ["cond_a", "cond_b"]
 
 
 def test_speaker_selection_from_curated_metadata() -> None:
@@ -460,7 +599,7 @@ def test_compute_speaker_similarity_uses_configured_eval_model() -> None:
                 {
                     "sample_id": "s1",
                     "run_id": "r1",
-                    "condition": "speecht5_zero_shot",
+                    "condition": "speecht5_lora_conservative",
                     "speaker_id": "speaker_01",
                     "prompt_id": "P001",
                     "text_variant": "normalized",
@@ -505,7 +644,7 @@ def test_compute_speaker_similarity_uses_configured_eval_model() -> None:
         assert float(updated.loc[updated["sample_id"].eq("s1"), "speaker_similarity"].iloc[0]) == 1.0
 
 
-def test_speecht5_zero_shot_loader_does_not_require_training_stack(monkeypatch) -> None:
+def test_speecht5_runtime_loader_does_not_require_training_stack(monkeypatch) -> None:
     fake_librosa = types.ModuleType("librosa")
     fake_soundfile = types.ModuleType("soundfile")
     fake_torch = types.ModuleType("torch")
@@ -523,7 +662,7 @@ def test_speecht5_zero_shot_loader_does_not_require_training_stack(monkeypatch) 
 
     def _guard_training_import(name: str):
         if name in {"Seq2SeqTrainer", "Seq2SeqTrainingArguments"}:
-            raise AssertionError("zero-shot loader should not import training classes")
+            raise AssertionError("runtime loader should not import training classes")
         raise AttributeError(name)
 
     fake_transformers.__getattr__ = _guard_training_import
@@ -799,24 +938,31 @@ def test_metric_aggregation_contract() -> None:
         tmp = Path(tmpdir)
         samples_path = tmp / "samples.csv"
         rows = []
-        for condition, wer, similarity, nisqa in [
-            ("speecht5_zero_shot", 0.31, 0.62, 3.1),
-            ("speecht5_few_shot_decoder_ft", 0.22, 0.71, 3.5),
-            ("speecht5_lora", 0.18, 0.76, 3.7),
+        for checkpoint_label, speaker_id, wer, similarity, nisqa in [
+            ("speecht5_lora_conservative@step500", "speaker_01", 0.31, 0.62, 3.1),
+            ("speecht5_lora_unique@step500", "speaker_01", 0.22, 0.71, 3.5),
+            ("speecht5_lora_conservative@step500", "speaker_02", 0.28, 0.66, 3.2),
+            ("speecht5_lora_unique@step500", "speaker_02", 0.20, 0.73, 3.6),
         ]:
             rows.append(
                 {
-                    "sample_id": f"{condition}_sample",
-                    "run_id": f"{condition}__speaker_01__P001__normalized",
-                    "condition": condition,
-                    "speaker_id": "speaker_01",
+                    "sample_id": f"{checkpoint_label}_{speaker_id}",
+                    "run_id": f"base__{speaker_id}__P001__normalized",
+                    "condition": checkpoint_label.split("@", 1)[0],
+                    "speaker_id": speaker_id,
                     "prompt_id": "P001",
                     "text_variant": "normalized",
                     "target_text": "Texto de teste.",
                     "audio_path": "audio.wav",
                     "reference_audio_path": "reference.wav",
                     "speaker_embedding_path": "embedding.npy",
-                    "model_name": condition,
+                    "model_name": checkpoint_label,
+                    "checkpoint_label": checkpoint_label,
+                    "checkpoint_step": "500",
+                    "checkpoint_path": f"artifacts/checkpoints/{checkpoint_label}",
+                    "checkpoint_run_ts": "20260426T010203Z",
+                    "training_scope": "per_speaker",
+                    "training_unit": speaker_id,
                     "run_started_at": "",
                     "run_finished_at": "",
                     "failure_reason": "",
@@ -829,15 +975,22 @@ def test_metric_aggregation_contract() -> None:
                     "inference_seconds": 1.2,
                     "cost_usd": 0.05,
                     "status": "ok",
-                    "lora_gate_status": "stable_lora" if condition == "speecht5_lora" else "",
+                    "lora_gate_status": "stable_lora",
                 }
             )
         pd.DataFrame(rows).to_csv(samples_path, index=False)
         metrics, costs = aggregate_metrics(samples_path, tmp / "evaluation")
         assert not metrics.empty
-        assert costs["samples"].sum() == 3
+        assert set(costs["condition"]) == {
+            "speecht5_lora_conservative@step500",
+            "speecht5_lora_unique@step500",
+        }
+        assert costs["samples"].sum() == 4
+        assert (metrics["condition"] == "speecht5_lora_conservative@step500 vs speecht5_lora_unique@step500").any()
         assert (tmp / "evaluation/metrics_summary.csv").exists()
         assert (tmp / "evaluation/cost_summary.csv").exists()
+        assert (tmp / "evaluation/metrics_by_speaker.csv").exists()
+        assert (tmp / "evaluation/cost_by_speaker.csv").exists()
 
 
 def test_wer_computation() -> None:
@@ -851,7 +1004,7 @@ def test_wer_computation() -> None:
                 {
                     "sample_id": "s1",
                     "run_id": "r1",
-                    "condition": "speecht5_zero_shot",
+                    "condition": "speecht5_lora_conservative",
                     "speaker_id": "speaker_01",
                     "prompt_id": "P001",
                     "text_variant": "normalized",
@@ -859,7 +1012,7 @@ def test_wer_computation() -> None:
                     "audio_path": "audio.wav",
                     "reference_audio_path": "reference.wav",
                     "speaker_embedding_path": "embedding.npy",
-                    "model_name": "speecht5_zero_shot",
+                    "model_name": "speecht5_lora_conservative",
                     "run_started_at": "",
                     "run_finished_at": "",
                     "failure_reason": "",
@@ -1165,20 +1318,30 @@ def test_report_assets_without_human_eval() -> None:
         tmp = Path(tmpdir)
         samples_path = tmp / "samples.csv"
         rows = []
-        for condition in ["speecht5_zero_shot", "speecht5_few_shot_decoder_ft", "speecht5_lora"]:
+        for checkpoint_label, speaker_id in [
+            ("speecht5_lora_conservative@step500", "speaker_01"),
+            ("speecht5_lora_unique@step500", "speaker_01"),
+            ("speecht5_lora_unique@step1000", "speaker_02"),
+        ]:
             rows.append(
                 {
-                    "sample_id": f"{condition}_sample",
-                    "run_id": f"{condition}__speaker_01__P001__normalized",
-                    "condition": condition,
-                    "speaker_id": "speaker_01",
+                    "sample_id": f"{checkpoint_label}_{speaker_id}",
+                    "run_id": f"base__{speaker_id}__P001__normalized",
+                    "condition": checkpoint_label.split("@", 1)[0],
+                    "speaker_id": speaker_id,
                     "prompt_id": "P001",
                     "text_variant": "normalized",
                     "target_text": "Texto de teste.",
                     "audio_path": __file__,
                     "reference_audio_path": __file__,
                     "speaker_embedding_path": "embedding.npy",
-                    "model_name": condition,
+                    "model_name": checkpoint_label,
+                    "checkpoint_label": checkpoint_label,
+                    "checkpoint_step": checkpoint_label.split("step", 1)[1],
+                    "checkpoint_path": f"artifacts/checkpoints/{checkpoint_label}",
+                    "checkpoint_run_ts": "20260426T010203Z",
+                    "training_scope": "per_speaker",
+                    "training_unit": speaker_id,
                     "run_started_at": "",
                     "run_finished_at": "",
                     "failure_reason": "",
@@ -1191,7 +1354,7 @@ def test_report_assets_without_human_eval() -> None:
                     "inference_seconds": 1.0,
                     "cost_usd": 0.05,
                     "status": "ok",
-                    "lora_gate_status": "stable_lora" if condition == "speecht5_lora" else "",
+                    "lora_gate_status": "stable_lora",
                     "asr_text": "Texto de teste.",
                 }
             )
@@ -1199,23 +1362,36 @@ def test_report_assets_without_human_eval() -> None:
 
         metrics = pd.DataFrame(
             [
-                {"condition": "speecht5_zero_shot", "text_variant": "normalized", "metric": "wer", "n": 1, "mean": 0.3, "median": 0.3, "std": 0, "ci95_low": 0.3, "ci95_high": 0.3, "test": "", "statistic": "", "p_value": ""},
-                {"condition": "speecht5_lora", "text_variant": "normalized", "metric": "wer", "n": 1, "mean": 0.1, "median": 0.1, "std": 0, "ci95_low": 0.1, "ci95_high": 0.1, "test": "", "statistic": "", "p_value": ""},
+                {"condition": "speecht5_lora_conservative@step500", "text_variant": "normalized", "metric": "wer", "n": 1, "mean": 0.3, "median": 0.3, "std": 0, "ci95_low": 0.3, "ci95_high": 0.3, "test": "", "statistic": "", "p_value": ""},
+                {"condition": "speecht5_lora_unique@step500", "text_variant": "normalized", "metric": "wer", "n": 1, "mean": 0.1, "median": 0.1, "std": 0, "ci95_low": 0.1, "ci95_high": 0.1, "test": "", "statistic": "", "p_value": ""},
             ]
         )
         costs = pd.DataFrame(
             [
-                {"condition": "speecht5_zero_shot", "samples": 1, "total_cost_usd": 0.05, "total_train_gpu_hours": 0, "mean_rtf": 1.0, "mean_inference_seconds": 1.0},
-                {"condition": "speecht5_lora", "samples": 1, "total_cost_usd": 0.10, "total_train_gpu_hours": 0.2, "mean_rtf": 0.8, "mean_inference_seconds": 0.8},
+                {"condition": "speecht5_lora_conservative@step500", "samples": 1, "total_cost_usd": 0.05, "total_train_gpu_hours": 0.2, "mean_rtf": 1.0, "mean_inference_seconds": 1.0},
+                {"condition": "speecht5_lora_unique@step500", "samples": 1, "total_cost_usd": 0.10, "total_train_gpu_hours": 0.2, "mean_rtf": 0.8, "mean_inference_seconds": 0.8},
+            ]
+        )
+        metrics_by_speaker = pd.DataFrame(
+            [
+                {"condition": "speecht5_lora_conservative@step500", "speaker_id": "speaker_01", "text_variant": "normalized", "metric": "wer", "n": 1, "mean": 0.3, "median": 0.3, "std": 0, "ci95_low": 0.3, "ci95_high": 0.3},
+            ]
+        )
+        cost_by_speaker = pd.DataFrame(
+            [
+                {"condition": "speecht5_lora_conservative@step500", "speaker_id": "speaker_01", "samples": 1, "total_cost_usd": 0.05, "total_train_gpu_hours": 0.2, "mean_rtf": 1.0, "mean_inference_seconds": 1.0},
             ]
         )
         metrics_path = tmp / "metrics.csv"
         costs_path = tmp / "costs.csv"
         metrics.to_csv(metrics_path, index=False)
         costs.to_csv(costs_path, index=False)
+        metrics_by_speaker.to_csv(tmp / "metrics_by_speaker.csv", index=False)
+        cost_by_speaker.to_csv(tmp / "cost_by_speaker.csv", index=False)
         outputs = make_report_assets(samples_path, metrics_path, costs_path, tmp / "report_assets")
         assert (tmp / "report_assets/overview.md").exists()
         assert "metrics_markdown" in outputs
+        assert "metrics_by_speaker_markdown" in outputs
         assert "human_markdown" not in outputs
 
 

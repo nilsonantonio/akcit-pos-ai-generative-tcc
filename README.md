@@ -4,7 +4,7 @@ Base executavel para a parte pratica do TCC em IA generativa de audio.
 
 O projeto implementa o plano operacional atualizado:
 
-- eixo principal em `SpeechT5`: `zero-shot`, `few-shot decoder fine-tune` e `LoRA`;
+- eixo principal em `SpeechT5`: condicionais `LoRA` com avaliacao por checkpoint;
 - `Whisper` sem ajuste como avaliador de WER;
 - `SpeechBrain ECAPA` para embeddings e similaridade de speaker;
 - `BRSpeech-DF` como evidencia contextual, nao como braco principal.
@@ -18,7 +18,7 @@ O projeto implementa o plano operacional atualizado:
 - `data/manifests/speaker_selection.csv`: selecao final de speakers usada nas etapas de embeddings e avaliacao.
 - `tcc_audio/`: pacote com validacao, matriz de runs, inferencia, metricas e relatorios.
 - `scripts/`: wrappers de linha de comando.
-- `demo/app.py`: demo Gradio minima para comparar amostras A/B/C.
+- `demo/app.py`: demo Gradio minima para comparar checkpoints LoRA A/B/C.
 - `MANUAL_EXECUCAO.md`: manual completo por ambiente.
 - `tests/smoke_test.py`: checagens locais sem modelos nem datasets.
 
@@ -107,22 +107,7 @@ python3 scripts/init_samples.py \
   --out artifacts/evaluation/samples.csv
 ```
 
-10. Rode os modelos:
-
-```bash
-python3 scripts/run_speecht5_zero_shot.py \
-  --config configs/speecht5_minimal.yaml \
-  --samples artifacts/evaluation/samples.csv
-```
-
-```bash
-python3 scripts/run_speecht5_few_shot.py \
-  --config configs/speecht5_minimal.yaml \
-  --manifest data/manifests/data_manifest.csv \
-  --samples artifacts/evaluation/samples.csv \
-  --checkpoint-dir artifacts/checkpoints/few_shot \
-  --gpu-hourly-rate 0.0
-```
+10. Rode o pipeline LoRA:
 
 ```bash
 python3 scripts/run_speecht5_lora.py \
@@ -133,6 +118,21 @@ python3 scripts/run_speecht5_lora.py \
   --gpu-hourly-rate 0.0
 ```
 
+Sem `--condition`, todas as condicionais LoRA do YAML sao treinadas sequencialmente. Para rodar apenas um subconjunto:
+
+```bash
+python3 scripts/run_speecht5_lora.py \
+  --config configs/speecht5_minimal.yaml \
+  --manifest data/manifests/data_manifest.csv \
+  --samples artifacts/evaluation/samples.csv \
+  --checkpoint-dir artifacts/checkpoints/lora \
+  --condition speecht5_lora_conservative \
+  --condition speecht5_lora_unique \
+  --gpu-hourly-rate 0.0
+```
+
+Cada checkpoint salvo vira um braco independente de avaliacao e materializa linhas novas no `samples.csv` com `checkpoint_label=<condicao>@step<k>`.
+
 Se for necessario preencher custos de treino depois da execucao, o backfill usa `total_train_gpu_hours` quando a coluna estiver salva no `samples.csv` e, na falta dela, cai para `run_started_at` e `run_finished_at`:
 
 ```bash
@@ -142,7 +142,7 @@ python3 scripts/backfill_training_costs.py \
   --summary-out artifacts/evaluation/manual_training_costs_summary.csv
 ```
 
-11. Rode Whisper e calcule WER:
+11. Rode Whisper e calcule WER para as amostras materializadas por checkpoint:
 
 ```bash
 python3 scripts/run_whisper_batch.py \
@@ -255,14 +255,18 @@ speaker_id,utterance_id,split,duration_s,source,license,audio_path,reference_aud
 O arquivo `samples.csv` de avaliacao deve conter, no minimo:
 
 ```text
-sample_id,run_id,condition,speaker_id,prompt_id,text_variant,target_text,audio_path,reference_audio_path,speaker_embedding_path,model_name,run_started_at,run_finished_at,failure_reason,wer,speaker_similarity,nisqa,f0_rmse,rtf,train_gpu_hours,inference_seconds,cost_usd,status,lora_gate_status
+sample_id,run_id,condition,speaker_id,prompt_id,text_variant,target_text,audio_path,reference_audio_path,speaker_embedding_path,model_name,checkpoint_label,checkpoint_step,checkpoint_path,checkpoint_run_ts,training_scope,training_unit,run_started_at,run_finished_at,failure_reason,wer,speaker_similarity,nisqa,f0_rmse,rtf,train_gpu_hours,inference_seconds,cost_usd,status,lora_gate_status
 ```
 
 No `samples.csv`, `speaker_embedding_path` representa apenas o embedding de sintese usado pelo TTS.
+`condition` preserva a condicional base do YAML, enquanto `checkpoint_label` e o rotulo analitico principal usado nas comparacoes e agregacoes.
 
 Campos extras sao permitidos. Use `asr_text` para armazenar a transcricao do Whisper antes de rodar `scripts/compute_wer.py`.
-Quando disponivel, `total_train_gpu_hours` armazena o tempo total de treino por grupo `condition + speaker_id` e e usado pelo backfill de custos.
+Quando disponivel, `total_train_gpu_hours` armazena o tempo total de treino por unidade de treino materializada e e usado pelo backfill de custos.
 
-## Gate de LoRA
+## Checkpoints LoRA
 
-Se `LoRA/PEFT` em `SpeechT5` nao estiver estavel, marque `lora_gate_status=fallback_decoder_postnet_ft` nos metadados do run e trate `speecht5_few_shot_decoder_ft` como fallback metodologico. LoRA fica documentado como risco metodologico/trabalho futuro.
+- Cada condicional LoRA deve declarar subblocos separados `lora` e `training`.
+- `training.scope` aceita `per_speaker` e `unique`.
+- `save_total_limit` pode aparecer no YAML como metadado de configuracao, mas o pipeline ignora pruning para preservar todos os checkpoints avaliados.
+- As agregacoes principais saem por `checkpoint_label`, e o diretório de avaliacao tambem recebe visoes por speaker.

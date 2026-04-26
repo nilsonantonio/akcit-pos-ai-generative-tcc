@@ -55,14 +55,13 @@ Arquivos de controle:
 5. Selecionar globalmente os 4 speakers alvo e validar manifesto.
 6. Extrair embeddings de speaker.
 7. Gerar matriz e ledger de amostras.
-8. Rodar `SpeechT5 zero-shot`.
-9. Rodar `SpeechT5 few-shot decoder fine-tune`.
-10. Rodar `SpeechT5 LoRA`.
-11. Rodar `Whisper`.
-12. Calcular `WER`, `speaker_similarity`, `NISQA`, `F0 RMSE`.
-13. Agregar resultados.
-14. Gerar `report_assets/`.
-15. Abrir demo Gradio.
+8. Rodar as condicionais `SpeechT5 LoRA` configuradas no YAML.
+9. Materializar checkpoints e gerar audios por checkpoint salvo.
+10. Rodar `Whisper`.
+11. Calcular `WER`, `speaker_similarity`, `NISQA`, `F0 RMSE`.
+12. Agregar resultados.
+13. Gerar `report_assets/`.
+14. Abrir demo Gradio.
 
 ## 3. Runbook: Mac M2 Pro Max host-native com MPS
 
@@ -72,7 +71,7 @@ Capacidade assumida:
 
 - `64 GB` de memoria unificada
 - `32-core GPU` integrada
-- adequado para zero-shot, embeddings, metricas, pilotos de treino e parte relevante do treino principal se couber em memoria
+- adequado para embeddings, metricas, pilotos LoRA e parte relevante do treino principal se couber em memoria
 
 ### Preparacao
 
@@ -92,13 +91,13 @@ O bootstrap:
 - valida `torch.backends.mps.is_available()`
 - roda smoke tests do projeto
 
-Cheque rapido antes de rodar `few-shot` ou `LoRA`:
+Cheque rapido antes de rodar `LoRA`:
 
 ```bash
 python3 -c "import lzma, _lzma; print('lzma ok')"
 ```
 
-Se esse comando falhar com `No module named '_lzma'`, o problema e do interpretador Python, nao do script `run_speecht5_few_shot.py`. Em `macOS + Homebrew + asdf`, a recuperacao esperada e:
+Se esse comando falhar com `No module named '_lzma'`, o problema e do interpretador Python, nao do pipeline `run_speecht5_lora.py`. Em `macOS + Homebrew + asdf`, a recuperacao esperada e:
 
 ```bash
 brew install xz
@@ -179,22 +178,15 @@ python3 scripts/init_samples.py \
 ```
 
 ```bash
-python3 scripts/run_speecht5_zero_shot.py \
-  --config configs/speecht5_minimal.yaml \
-  --samples artifacts/evaluation/samples.csv
-```
-
-Pilotos de treino recomendados primeiro:
-
-```bash
-python3 scripts/run_speecht5_few_shot.py \
+python3 scripts/run_speecht5_lora.py \
   --config configs/speecht5_minimal.yaml \
   --manifest data/manifests/data_manifest.csv \
   --samples artifacts/evaluation/samples.csv \
-  --checkpoint-dir artifacts/checkpoints/few_shot \
-  --gpu-hourly-rate 0.0 \
-  --max-steps 50
+  --checkpoint-dir artifacts/checkpoints/lora \
+  --gpu-hourly-rate 0.0
 ```
+
+Sem `--condition`, o script percorre todas as condicionais LoRA do YAML em sequencia. Para rodar apenas um subconjunto:
 
 ```bash
 python3 scripts/run_speecht5_lora.py \
@@ -202,9 +194,12 @@ python3 scripts/run_speecht5_lora.py \
   --manifest data/manifests/data_manifest.csv \
   --samples artifacts/evaluation/samples.csv \
   --checkpoint-dir artifacts/checkpoints/lora \
-  --gpu-hourly-rate 0.0 \
-  --max-steps 50
+  --condition speecht5_lora_conservative \
+  --condition speecht5_lora_unique \
+  --gpu-hourly-rate 0.0
 ```
+
+Cada checkpoint salvo em `checkpoint-<step>` vira um braco independente de avaliacao e materializa novas linhas no `samples.csv`.
 
 Se precisar preencher `train_gpu_hours` e `cost_usd` depois do treino, o backfill usa `total_train_gpu_hours` quando a coluna estiver salva no `samples.csv` e, na falta dela, cai para `run_started_at` e `run_finished_at`:
 
@@ -280,8 +275,6 @@ python3 scripts/validate_manifest.py --manifest data/manifests/data_manifest.csv
 python3 scripts/extract_speaker_embeddings.py --config configs/speecht5_minimal.yaml --speaker-selection data/manifests/speaker_selection.csv --out-index artifacts/embeddings/speaker_embeddings.csv --out-dir artifacts/embeddings
 python3 scripts/generate_run_matrix.py --config configs/speecht5_minimal.yaml --out artifacts/run_matrix.csv
 python3 scripts/init_samples.py --run-matrix artifacts/run_matrix.csv --speaker-selection data/manifests/speaker_selection.csv --speaker-embeddings artifacts/embeddings/speaker_embeddings.csv --out artifacts/evaluation/samples.csv
-python3 scripts/run_speecht5_zero_shot.py --config configs/speecht5_minimal.yaml --samples artifacts/evaluation/samples.csv
-python3 scripts/run_speecht5_few_shot.py --config configs/speecht5_minimal.yaml --manifest data/manifests/data_manifest.csv --samples artifacts/evaluation/samples.csv --checkpoint-dir artifacts/checkpoints/few_shot --gpu-hourly-rate 0.0
 python3 scripts/run_speecht5_lora.py --config configs/speecht5_minimal.yaml --manifest data/manifests/data_manifest.csv --samples artifacts/evaluation/samples.csv --checkpoint-dir artifacts/checkpoints/lora --gpu-hourly-rate 0.0
 python3 scripts/run_whisper_batch.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
 python3 scripts/compute_wer.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
