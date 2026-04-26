@@ -102,8 +102,9 @@ def _load_nisqa_predictor(nisqa_path: str | Path | None = None):
             return predictor
 
     raise SystemExit(
-        "NISQA is not installed. Install it in the active environment or point to a local checkout with "
-        "`--nisqa-path /path/to/NISQA` or `NISQA_PATH=/path/to/NISQA` before running this metric."
+        "NISQA is not installed. Install it in the active environment or point to a valid local checkout with "
+        "`--nisqa-path /path/to/NISQA` or `NISQA_PATH=/path/to/NISQA`. "
+        "In this project, the expected checkout path is `./NISQA`."
     )
 
 
@@ -111,7 +112,8 @@ def _resolve_nisqa_root(nisqa_path: str | Path | None = None) -> Path:
     roots = _iter_nisqa_search_roots(nisqa_path)
     if not roots:
         raise SystemExit(
-            "NISQA path not found. Pass `--nisqa-path /path/to/NISQA` or export `NISQA_PATH=/path/to/NISQA`."
+            "NISQA path not found. Clone the official repository into `./NISQA`, pass "
+            "`--nisqa-path /path/to/NISQA`, or export `NISQA_PATH=/path/to/NISQA`."
         )
     return roots[0]
 
@@ -120,7 +122,8 @@ def _resolve_nisqa_pretrained_model(nisqa_root: Path) -> Path:
     model_path = nisqa_root / "weights" / "nisqa_tts.tar"
     if not model_path.exists():
         raise SystemExit(
-            f"NISQA checkpoint not found at `{model_path}`. The TTS naturalness model `weights/nisqa_tts.tar` is required."
+            f"NISQA checkpoint not found at `{model_path}`. The project expects a valid checkout at `./NISQA` "
+            "with the TTS naturalness model `weights/nisqa_tts.tar` present."
         )
     return model_path
 

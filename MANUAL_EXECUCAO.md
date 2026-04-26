@@ -85,7 +85,8 @@ O bootstrap:
 
 - cria `.venv`
 - instala `requirements-macos-mps.txt`, incluindo `pytest` para os smoke tests
-- clona `NISQA` em `./NISQA`
+- clona ou recria `NISQA` em `./NISQA`
+- valida `./NISQA/.git`, `./NISQA/nisqa/NISQA_model.py` e `./NISQA/weights/nisqa_tts.tar`
 - exige `ffmpeg` no host
 - valida suporte do Python a `lzma/_lzma`
 - valida `torch.backends.mps.is_available()`
@@ -220,8 +221,7 @@ Depois do piloto, rode as fases restantes:
 python3 scripts/run_whisper_batch.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
 python3 scripts/compute_wer.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
 python3 scripts/compute_speaker_similarity.py --config configs/speecht5_minimal.yaml --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
-git clone https://github.com/gabrielmittag/NISQA.git
-python3 scripts/compute_nisqa.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
+git clone https://github.com/gabrielmittag/NISQA.git ./NISQA
 python3 scripts/compute_nisqa.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv --nisqa-path "$(pwd)/NISQA"
 python3 scripts/compute_f0_rmse.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
 python3 scripts/aggregate_metrics.py --samples artifacts/evaluation/samples.csv --out-dir artifacts/evaluation
@@ -249,7 +249,8 @@ bash scripts/bootstrap_nvidia_linux.sh
 O bootstrap:
 
 - instala `requirements-linux-gpu.txt`, incluindo `pytest` para os smoke tests
-- clona `NISQA` em `./NISQA`
+- clona ou recria `NISQA` em `./NISQA`
+- valida `./NISQA/.git`, `./NISQA/nisqa/NISQA_model.py` e `./NISQA/weights/nisqa_tts.tar`
 - exige `ffmpeg`
 - exige `nvidia-smi`
 - valida `torch.cuda.is_available()`
@@ -285,11 +286,8 @@ python3 scripts/run_speecht5_lora.py --config configs/speecht5_minimal.yaml --ma
 python3 scripts/run_whisper_batch.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
 python3 scripts/compute_wer.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
 python3 scripts/compute_speaker_similarity.py --config configs/speecht5_minimal.yaml --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
-git clone https://github.com/gabrielmittag/NISQA.git
-python3 scripts/compute_nisqa.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
-# ou:
-export NISQA_PATH=/caminho/para/NISQA
-python3 scripts/compute_nisqa.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
+git clone https://github.com/gabrielmittag/NISQA.git ./NISQA
+python3 scripts/compute_nisqa.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv --nisqa-path "$(pwd)/NISQA"
 python3 scripts/compute_f0_rmse.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
 python3 scripts/aggregate_metrics.py --samples artifacts/evaluation/samples.csv --out-dir artifacts/evaluation
 python3 scripts/make_report_assets.py --samples artifacts/evaluation/samples.csv --metrics artifacts/evaluation/metrics_summary.csv --costs artifacts/evaluation/cost_summary.csv --out-dir report_assets

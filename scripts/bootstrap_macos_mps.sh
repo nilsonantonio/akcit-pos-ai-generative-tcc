@@ -31,11 +31,24 @@ if ! command -v git >/dev/null 2>&1; then
   exit 1
 fi
 
-if [ ! -d "${PROJECT_ROOT}/NISQA/nisqa" ]; then
-  git clone https://github.com/gabrielmittag/NISQA.git "${PROJECT_ROOT}/NISQA"
-else
-  echo "NISQA ja presente em ${PROJECT_ROOT}/NISQA"
-fi
+ensure_nisqa_checkout() {
+  local nisqa_root="${PROJECT_ROOT}/NISQA"
+
+  if [ ! -d "${nisqa_root}/.git" ] || [ ! -f "${nisqa_root}/nisqa/NISQA_model.py" ] || [ ! -f "${nisqa_root}/weights/nisqa_tts.tar" ]; then
+    echo "NISQA ausente ou incompleto em ${nisqa_root}. Recriando checkout local..."
+    rm -rf "${nisqa_root}"
+    git clone https://github.com/gabrielmittag/NISQA.git "${nisqa_root}"
+  else
+    echo "NISQA valido ja presente em ${nisqa_root}"
+  fi
+
+  if [ ! -d "${nisqa_root}/.git" ] || [ ! -f "${nisqa_root}/nisqa/NISQA_model.py" ] || [ ! -f "${nisqa_root}/weights/nisqa_tts.tar" ]; then
+    echo "Checkout do NISQA invalido em ${nisqa_root}. Verifique o clone e a presenca de weights/nisqa_tts.tar." >&2
+    exit 1
+  fi
+}
+
+ensure_nisqa_checkout
 
 if ! command -v ffmpeg >/dev/null 2>&1; then
   echo "ffmpeg nao encontrado. Instale com: brew install ffmpeg" >&2
@@ -55,4 +68,4 @@ PY
 
 python -B tests/smoke_test.py extended
 
-echo "Bootstrap macOS MPS finalizado. NISQA disponivel em ${PROJECT_ROOT}/NISQA"
+echo "Bootstrap macOS MPS finalizado. Ambiente ok com checkout valido do NISQA em ${PROJECT_ROOT}/NISQA"

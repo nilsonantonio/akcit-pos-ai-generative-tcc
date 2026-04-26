@@ -22,7 +22,12 @@ from tcc_audio.common_voice_download import (
     request_dataset_download_session,
     stage_common_voice_archive,
 )
-from tcc_audio.audio_metrics import compute_speaker_similarity
+from tcc_audio.audio_metrics import (
+    _load_nisqa_predictor,
+    _resolve_nisqa_pretrained_model,
+    _resolve_nisqa_root,
+    compute_speaker_similarity,
+)
 from tcc_audio.config import (
     DEFAULT_SPEAKER_SIMILARITY_MODEL,
     DEFAULT_TTS_SPEAKER_EMBEDDING_DIM,
@@ -43,7 +48,6 @@ from tcc_audio.speecht5_runner import (
     _load_torch_stack,
     _load_training_stack,
 )
-from tcc_audio.audio_metrics import _load_nisqa_predictor
 from tcc_audio.speecht5_text import count_unk_tokens, has_unk_tokens, normalize_text_for_speecht5
 from tcc_audio.wer import word_error_rate, compute_wer_from_asr
 
@@ -691,6 +695,36 @@ def test_load_nisqa_predictor_error_mentions_local_checkout(monkeypatch) -> None
         assert "NISQA_PATH" in str(exc)
     else:
         raise AssertionError("expected NISQA loader to report local checkout guidance")
+
+
+def test_resolve_nisqa_root_error_mentions_project_checkout() -> None:
+    with TemporaryDirectory() as tmpdir:
+        cwd = Path(tmpdir)
+        previous = Path.cwd()
+        os.chdir(cwd)
+        try:
+            try:
+                _resolve_nisqa_root()
+            except SystemExit as exc:
+                assert "./NISQA" in str(exc)
+                assert "--nisqa-path" in str(exc)
+            else:
+                raise AssertionError("expected missing NISQA root to raise SystemExit")
+        finally:
+            os.chdir(previous)
+
+
+def test_resolve_nisqa_pretrained_model_requires_tts_checkpoint() -> None:
+    with TemporaryDirectory() as tmpdir:
+        checkout = Path(tmpdir) / "NISQA"
+        (checkout / "weights").mkdir(parents=True, exist_ok=True)
+        try:
+            _resolve_nisqa_pretrained_model(checkout)
+        except SystemExit as exc:
+            assert "weights/nisqa_tts.tar" in str(exc)
+            assert "./NISQA" in str(exc)
+        else:
+            raise AssertionError("expected missing NISQA checkpoint to raise SystemExit")
 
 
 def test_speecht5_text_normalization_and_unk_audit() -> None:

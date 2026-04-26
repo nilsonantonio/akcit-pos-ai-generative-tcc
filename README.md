@@ -176,19 +176,16 @@ python3 scripts/compute_nisqa.py \
 O NISQA nao faz parte deste repositorio. Antes desse passo, baixe o repositorio oficial localmente:
 
 ```bash
-git clone https://github.com/gabrielmittag/NISQA.git
+git clone https://github.com/gabrielmittag/NISQA.git ./NISQA
 ```
+
+Neste projeto, o checkout canonico fica em `./NISQA`. Os bootstraps oficiais ja fazem esse clone e validam o ambiente. Antes de rodar a metrica fora do bootstrap, confirme que o checkout contem:
+
+- `./NISQA/.git`
+- `./NISQA/nisqa/NISQA_model.py`
+- `./NISQA/weights/nisqa_tts.tar`
 
 Se o pacote NISQA nao estiver instalado no ambiente ativo, aponte esse checkout local no comando:
-
-```bash
-python3 scripts/compute_nisqa.py \
-  --samples artifacts/evaluation/samples.csv \
-  --out artifacts/evaluation/samples.csv \
-  --nisqa-path /caminho/para/NISQA
-```
-
-Exemplo, se o clone foi feito na raiz do projeto:
 
 ```bash
 python3 scripts/compute_nisqa.py \
@@ -197,7 +194,11 @@ python3 scripts/compute_nisqa.py \
   --nisqa-path "$(pwd)/NISQA"
 ```
 
-Ou exporte `NISQA_PATH=/caminho/para/NISQA`.
+Ou exporte:
+
+```bash
+export NISQA_PATH="$(pwd)/NISQA"
+```
 
 ```bash
 python3 scripts/compute_f0_rmse.py \
