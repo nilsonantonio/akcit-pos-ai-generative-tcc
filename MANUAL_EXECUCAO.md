@@ -54,7 +54,7 @@ Arquivos de controle:
 2. Baixar e extrair o dataset `pt` para `data/raw/common_voice_pt/`.
 3. Preparar metadados do subconjunto `pt-BR`.
 4. Preprocessar audio para WAV mono.
-5. Selecionar os 4 speakers e validar manifesto.
+5. Selecionar globalmente os 4 speakers alvo e validar manifesto.
 6. Extrair embeddings de speaker.
 7. Gerar matriz e ledger de amostras.
 8. Rodar `SpeechT5 zero-shot`.
@@ -156,14 +156,17 @@ python3 scripts/preprocess_audio_dataset.py \
 ```bash
 python3 scripts/select_speakers.py \
   --metadata data/manifests/common_voice_curated.csv \
+  --speaker-target-count 4 \
   --manifest-out data/manifests/data_manifest.csv \
   --speaker-selection-out data/manifests/speaker_selection.csv
 
 # 2s
-# Selected 6 speakers
-# Wrote 1200 manifest rows
+# Selected 4 speakers
+# Wrote 800 manifest rows
 # o manifesto agora inclui `target_text_speecht5`, frontend normalizado
 # e auditavel consumido pelo treino do SpeechT5.
+# a selecao e global por duracao total; `gender` permanece apenas informativo.
+# speakers com menos de 20 minutos continuam elegiveis.
 ```
 
 ```bash
@@ -174,11 +177,11 @@ python3 scripts/validate_manifest.py \
   --check-files
 
 # 3s
-# OK: data/manifests/data_manifest.csv (1200 rows)
+# OK: data/manifests/data_manifest.csv (800 rows)
 # summary.prompts_commercial_subset_count=8
 # summary.prompts_prompt_categories=abreviacoes, expressivas, homografos, interrogativas, neutras, numeros
 # summary.prompts_prompt_subexperiment_count=8
-# summary.speaker_count=6
+# summary.speaker_count=4
 # summary.speecht5_rows_with_unk_raw=938
 # summary.speecht5_rows_with_unk_normalized=0
 # summary.total_duration_s=7214.9039999999995
@@ -201,7 +204,7 @@ python3 scripts/extract_speaker_embeddings.py \
 # mean_var_norm_emb.ckpt: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 3.20k/3.20k [00:01<00:00, 3.19kB/s]
 # classifier.ckpt: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 15.9M/15.9M [00:02<00:00, 7.91MB/s]
 # label_encoder.txt: 129kB [00:00, 41.9MB/s]
-# Wrote 6 speaker embeddings to artifacts/embeddings/speaker_embeddings.csv
+# Wrote 4 speaker embeddings to artifacts/embeddings/speaker_embeddings.csv
 ```
 
 ```bash

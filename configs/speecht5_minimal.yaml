@@ -13,9 +13,6 @@ data:
   adaptation_dataset: common_voice_pt
   contextual_dataset: brspeech_df
   speaker_target_count: 4
-  gender_balance:
-    masculine: 2
-    feminine: 2
   minutes_per_speaker: 20
   sample_rate: 16000
   reference_clip_len_s:

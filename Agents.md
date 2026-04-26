@@ -1,0 +1,1 @@
+# Sempre execute os testes no ambiente .venv

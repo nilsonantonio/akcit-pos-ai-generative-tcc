@@ -57,14 +57,17 @@ python3 scripts/preprocess_audio_dataset.py \
   --out-metadata data/manifests/common_voice_curated.csv
 ```
 
-5. Gere o manifesto real a partir do subset curado de Common Voice.
+5. Gere o manifesto real a partir do subset curado de Common Voice. A selecao agora e global, limitada por `speaker_target_count`, e nao usa mais balanceamento por genero.
 
 ```bash
 python3 scripts/select_speakers.py \
   --metadata data/manifests/common_voice_curated.csv \
+  --speaker-target-count 4 \
   --manifest-out data/manifests/data_manifest.csv \
   --speaker-selection-out data/manifests/speaker_selection.csv
 ```
+
+`minutes_per_speaker` continua definindo o teto de audio amostrado por speaker, mas speakers com menos minutos continuam elegiveis.
 
 6. Valide o manifesto:
 

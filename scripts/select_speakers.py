@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI wrapper for balanced speaker selection."""
+"""CLI wrapper for global speaker selection."""
 
 import sys
 from pathlib import Path
@@ -11,4 +11,3 @@ from tcc_audio.speaker_selection import main
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

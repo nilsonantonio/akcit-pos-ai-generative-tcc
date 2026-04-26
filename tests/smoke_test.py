@@ -177,34 +177,41 @@ def test_speaker_selection_from_curated_metadata() -> None:
     with TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         rows = []
-        for gender in ["masculine", "feminine"]:
-            for speaker_index in range(2):
-                source_speaker_id = f"{gender}_{speaker_index}"
-                for utterance_index in range(12):
-                    rows.append(
-                        {
-                            "source_speaker_id": source_speaker_id,
-                            "gender": gender,
-                            "utterance_id": f"{source_speaker_id}_{utterance_index}",
-                            "duration_s": 120,
-                            "audio_path": f"audio/{source_speaker_id}_{utterance_index}.wav",
-                            "target_text": 'Ação de teste com “aspas” para seleção de speaker.',
-                            "license": "CC0",
-                            "source": "common_voice_pt",
-                            "locale": "pt",
-                        }
-                    )
+        for speaker_index in range(6):
+            source_speaker_id = f"speaker_{speaker_index}"
+            gender = "unknown" if speaker_index < 4 else "feminine"
+            utterance_duration = 150 - (speaker_index * 10)
+            for utterance_index in range(12):
+                rows.append(
+                    {
+                        "source_speaker_id": source_speaker_id,
+                        "gender": gender,
+                        "utterance_id": f"{source_speaker_id}_{utterance_index}",
+                        "duration_s": utterance_duration,
+                        "audio_path": f"audio/{source_speaker_id}_{utterance_index}.wav",
+                        "target_text": 'Ação de teste com “aspas” para seleção de speaker.',
+                        "license": "CC0",
+                        "source": "common_voice_pt",
+                        "locale": "pt",
+                    }
+                )
         metadata = tmp / "metadata.csv"
         pd.DataFrame(rows).to_csv(metadata, index=False)
         manifest, speaker_selection = select_speakers(
             metadata,
             tmp / "data_manifest.csv",
             tmp / "speaker_selection.csv",
-            speakers_per_gender=2,
+            speaker_target_count=4,
             minutes_per_speaker=20,
         )
         assert speaker_selection["speaker_id"].nunique() == 4
         assert manifest["speaker_id"].nunique() == 4
+        assert speaker_selection["source_speaker_id"].tolist() == [
+            "speaker_0",
+            "speaker_1",
+            "speaker_2",
+            "speaker_3",
+        ]
         assert "audio_path" in manifest.columns
         assert "target_text_speecht5" in manifest.columns
         assert manifest.loc[0, "target_text_speecht5"] == 'Acao de teste com "aspas" para selecao de speaker.'
@@ -221,6 +228,100 @@ def test_speaker_selection_from_curated_metadata() -> None:
             "source",
             "notes",
         }
+
+
+def test_speaker_selection_includes_shorter_speakers_when_ranked_globally() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        rows = []
+        speaker_specs = [
+            ("speaker_a", "unknown", [400, 350, 300, 250]),
+            ("speaker_b", "unknown", [390, 340, 290, 240]),
+            ("speaker_c", "masculine", [380, 330]),
+            ("speaker_d", "feminine", [370, 320]),
+            ("speaker_e", "feminine", [100, 90]),
+        ]
+        for source_speaker_id, gender, durations in speaker_specs:
+            for utterance_index, duration_s in enumerate(durations):
+                rows.append(
+                    {
+                        "source_speaker_id": source_speaker_id,
+                        "gender": gender,
+                        "utterance_id": f"{source_speaker_id}_{utterance_index}",
+                        "duration_s": duration_s,
+                        "audio_path": f"audio/{source_speaker_id}_{utterance_index}.wav",
+                        "target_text": "Texto de teste.",
+                        "license": "CC0",
+                        "source": "common_voice_pt",
+                    }
+                )
+        metadata = tmp / "metadata.csv"
+        pd.DataFrame(rows).to_csv(metadata, index=False)
+
+        manifest, speaker_selection = select_speakers(
+            metadata,
+            tmp / "data_manifest.csv",
+            tmp / "speaker_selection.csv",
+            speaker_target_count=4,
+            minutes_per_speaker=20,
+        )
+
+        assert speaker_selection["source_speaker_id"].tolist() == [
+            "speaker_a",
+            "speaker_b",
+            "speaker_c",
+            "speaker_d",
+        ]
+        shorter = speaker_selection[speaker_selection["source_speaker_id"].eq("speaker_c")].iloc[0]
+        assert float(shorter["total_duration_s"]) < 20 * 60
+        assert float(shorter["selected_train_duration_s"]) + float(shorter["selected_val_duration_s"]) == 710.0
+        assert manifest["speaker_id"].nunique() == 4
+
+
+def test_speaker_selection_handles_unknown_majority_without_gender_buckets() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        rows = []
+        speaker_specs = [
+            ("speaker_unknown_1", "unknown", 180),
+            ("speaker_unknown_2", "unknown", 170),
+            ("speaker_unknown_3", "unknown", 160),
+            ("speaker_unknown_4", "unknown", 150),
+            ("speaker_unknown_5", "unknown", 140),
+            ("speaker_f", "feminine", 100),
+        ]
+        for source_speaker_id, gender, duration_s in speaker_specs:
+            for utterance_index in range(8):
+                rows.append(
+                    {
+                        "source_speaker_id": source_speaker_id,
+                        "gender": gender,
+                        "utterance_id": f"{source_speaker_id}_{utterance_index}",
+                        "duration_s": duration_s,
+                        "audio_path": f"audio/{source_speaker_id}_{utterance_index}.wav",
+                        "target_text": "Texto de teste.",
+                        "license": "CC0",
+                        "source": "common_voice_pt",
+                    }
+                )
+        metadata = tmp / "metadata.csv"
+        pd.DataFrame(rows).to_csv(metadata, index=False)
+
+        _, speaker_selection = select_speakers(
+            metadata,
+            tmp / "data_manifest.csv",
+            tmp / "speaker_selection.csv",
+            speaker_target_count=4,
+            minutes_per_speaker=20,
+        )
+
+        assert speaker_selection["speaker_id"].nunique() == 4
+        assert speaker_selection["source_speaker_id"].tolist() == [
+            "speaker_unknown_1",
+            "speaker_unknown_2",
+            "speaker_unknown_3",
+            "speaker_unknown_4",
+        ]
 
 
 def test_speaker_embedding_config_resolution() -> None:
