@@ -205,28 +205,7 @@ python3 scripts/compute_f0_rmse.py \
   --out artifacts/evaluation/samples.csv
 ```
 
-11. Monte o pacote de avaliacao humana e depois importe os resultados:
-
-```bash
-python3 scripts/build_human_eval_pack.py \
-  --samples artifacts/evaluation/samples.csv \
-  --out-dir artifacts/human_eval_pack
-```
-
-```bash
-# Opcional: Simular votos humanos para teste
-python3 scripts/simulate_human_eval.py \
-  --input artifacts/human_eval_pack/human_eval_pack.csv \
-  --output artifacts/human_eval_pack/human_eval_pack.csv
-```
-
-```bash
-python3 scripts/import_human_eval_results.py \
-  --results artifacts/human_eval_pack/human_eval_pack.csv \
-  --out artifacts/evaluation/human_eval_summary.csv
-```
-
-12. Depois de preencher as metricas e marcar linhas concluidas com `status=ok`, agregue resultados:
+11. Depois de preencher as metricas e marcar linhas concluidas com `status=ok`, agregue resultados:
 
 ```bash
 python3 scripts/aggregate_metrics.py \
@@ -234,18 +213,17 @@ python3 scripts/aggregate_metrics.py \
   --out-dir artifacts/evaluation
 ```
 
-13. Gere assets finais:
+12. Gere assets finais:
 
 ```bash
 python3 scripts/make_report_assets.py \
   --samples artifacts/evaluation/samples.csv \
   --metrics artifacts/evaluation/metrics_summary.csv \
   --costs artifacts/evaluation/cost_summary.csv \
-  --human-eval artifacts/evaluation/human_eval_summary.csv \
   --out-dir report_assets
 ```
 
-14. Rode a demo, se `gradio` estiver instalado:
+13. Rode a demo, se `gradio` estiver instalado:
 
 ```bash
 python3 demo/app.py --samples artifacts/evaluation/samples.csv

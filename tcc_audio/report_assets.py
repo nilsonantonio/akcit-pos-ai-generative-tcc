@@ -29,7 +29,6 @@ def make_report_assets(
     samples_path: str | Path,
     metrics_path: str | Path,
     costs_path: str | Path,
-    human_eval_path: str | Path | None,
     out_dir: str | Path,
 ) -> dict[str, Path]:
     out_root = Path(out_dir)
@@ -37,21 +36,15 @@ def make_report_assets(
     samples = read_csv(samples_path)
     metrics = read_csv(metrics_path)
     costs = read_csv(costs_path)
-    human = read_csv(human_eval_path) if human_eval_path and Path(human_eval_path).exists() else pd.DataFrame()
 
     outputs = {
         "metrics_markdown": out_root / "metrics_summary.md",
         "costs_markdown": out_root / "cost_summary.md",
-        "human_markdown": out_root / "human_eval_summary.md",
         "overview_markdown": out_root / "overview.md",
     }
 
     outputs["metrics_markdown"].write_text(_frame_to_markdown(metrics), encoding="utf-8")
     outputs["costs_markdown"].write_text(_frame_to_markdown(costs), encoding="utf-8")
-    outputs["human_markdown"].write_text(
-        _frame_to_markdown(human) if not human.empty else "No human evaluation results available.\n",
-        encoding="utf-8",
-    )
 
     completed = samples[samples["status"].astype(str).str.lower().eq("ok")]
     overview = [
@@ -88,14 +81,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--samples", required=True)
     parser.add_argument("--metrics", required=True)
     parser.add_argument("--costs", required=True)
-    parser.add_argument("--human-eval")
     parser.add_argument("--out-dir", required=True)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    outputs = make_report_assets(args.samples, args.metrics, args.costs, args.human_eval, args.out_dir)
+    outputs = make_report_assets(args.samples, args.metrics, args.costs, args.out_dir)
     print(f"Wrote {len(outputs)} report asset files to {args.out_dir}")
     return 0
 

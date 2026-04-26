@@ -32,7 +32,6 @@ from tcc_audio.config import (
 )
 from tcc_audio.experiments import generate_run_matrix
 from tcc_audio.evaluation import aggregate_metrics
-from tcc_audio.human_eval import build_human_eval_pack, import_human_eval_results
 from tcc_audio.manifest import validate_data_manifest, validate_prompts
 from tcc_audio.report_assets import make_report_assets
 from tcc_audio.samples import initialize_samples
@@ -694,105 +693,6 @@ def test_load_nisqa_predictor_error_mentions_local_checkout(monkeypatch) -> None
         raise AssertionError("expected NISQA loader to report local checkout guidance")
 
 
-def test_build_human_eval_pack_accepts_generated_rows() -> None:
-    with TemporaryDirectory() as tmpdir:
-        tmp = Path(tmpdir)
-        samples_path = tmp / "samples.csv"
-        left_audio = tmp / "left.wav"
-        right_audio = tmp / "right.wav"
-        third_audio = tmp / "third.wav"
-        left_audio.write_bytes(b"fake")
-        right_audio.write_bytes(b"fake")
-        third_audio.write_bytes(b"fake")
-        pd.DataFrame(
-            [
-                {
-                    "sample_id": "zs",
-                    "run_id": "zs",
-                    "condition": "speecht5_zero_shot",
-                    "speaker_id": "speaker_01",
-                    "prompt_id": "P001",
-                    "text_variant": "raw",
-                    "target_text": "Texto de teste.",
-                    "audio_path": str(left_audio),
-                    "reference_audio_path": "reference.wav",
-                    "speaker_embedding_path": "embedding.npy",
-                    "model_name": "microsoft/speecht5_tts",
-                    "run_started_at": "",
-                    "run_finished_at": "",
-                    "failure_reason": "",
-                    "wer": "",
-                    "speaker_similarity": "",
-                    "nisqa": "",
-                    "f0_rmse": "",
-                    "rtf": "",
-                    "train_gpu_hours": "",
-                    "inference_seconds": "",
-                    "cost_usd": "",
-                    "status": "generated",
-                    "lora_gate_status": "",
-                },
-                {
-                    "sample_id": "fs",
-                    "run_id": "fs",
-                    "condition": "speecht5_few_shot_decoder_ft",
-                    "speaker_id": "speaker_01",
-                    "prompt_id": "P001",
-                    "text_variant": "raw",
-                    "target_text": "Texto de teste.",
-                    "audio_path": str(right_audio),
-                    "reference_audio_path": "reference.wav",
-                    "speaker_embedding_path": "embedding.npy",
-                    "model_name": "microsoft/speecht5_tts",
-                    "run_started_at": "",
-                    "run_finished_at": "",
-                    "failure_reason": "",
-                    "wer": "",
-                    "speaker_similarity": "",
-                    "nisqa": "",
-                    "f0_rmse": "",
-                    "rtf": "",
-                    "train_gpu_hours": "",
-                    "inference_seconds": "",
-                    "cost_usd": "",
-                    "status": "generated",
-                    "lora_gate_status": "",
-                },
-                {
-                    "sample_id": "pending",
-                    "run_id": "pending",
-                    "condition": "speecht5_lora",
-                    "speaker_id": "speaker_01",
-                    "prompt_id": "P001",
-                    "text_variant": "raw",
-                    "target_text": "Texto de teste.",
-                    "audio_path": str(third_audio),
-                    "reference_audio_path": "reference.wav",
-                    "speaker_embedding_path": "embedding.npy",
-                    "model_name": "microsoft/speecht5_tts",
-                    "run_started_at": "",
-                    "run_finished_at": "",
-                    "failure_reason": "",
-                    "wer": "",
-                    "speaker_similarity": "",
-                    "nisqa": "",
-                    "f0_rmse": "",
-                    "rtf": "",
-                    "train_gpu_hours": "",
-                    "inference_seconds": "",
-                    "cost_usd": "",
-                    "status": "pending",
-                    "lora_gate_status": "",
-                },
-            ]
-        ).to_csv(samples_path, index=False)
-
-        pack = build_human_eval_pack(samples_path, tmp / "human_eval_pack")
-
-    assert len(pack) == 1
-    assert {pack.iloc[0]["left_sample_id"], pack.iloc[0]["right_sample_id"]} == {"zs", "fs"}
-
-
 def test_speecht5_text_normalization_and_unk_audit() -> None:
     class FakeTokenizer:
         unk_token_id = 99
@@ -1226,7 +1126,7 @@ def test_stage_common_voice_archive_respects_overwrite() -> None:
         assert "4321" in restaged.clip_durations_path.read_text(encoding="utf-8")
 
 
-def test_human_eval_and_report_assets() -> None:
+def test_report_assets_without_human_eval() -> None:
     with TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         samples_path = tmp / "samples.csv"
@@ -1263,19 +1163,6 @@ def test_human_eval_and_report_assets() -> None:
             )
         pd.DataFrame(rows).to_csv(samples_path, index=False)
 
-        pack = build_human_eval_pack(samples_path, tmp / "human_eval_pack")
-        assert not pack.empty
-        results = tmp / "human_eval_results.csv"
-        filled = pack.copy()
-        filled["mos_left"] = 4
-        filled["mos_right"] = 3
-        filled["smos_left"] = 4
-        filled["smos_right"] = 3
-        filled["preferred_condition"] = filled["left_condition"]
-        filled.to_csv(results, index=False)
-        human_summary = import_human_eval_results(results, tmp / "human_eval_summary.csv")
-        assert not human_summary.empty
-
         metrics = pd.DataFrame(
             [
                 {"condition": "speecht5_zero_shot", "text_variant": "normalized", "metric": "wer", "n": 1, "mean": 0.3, "median": 0.3, "std": 0, "ci95_low": 0.3, "ci95_high": 0.3, "test": "", "statistic": "", "p_value": ""},
@@ -1292,9 +1179,10 @@ def test_human_eval_and_report_assets() -> None:
         costs_path = tmp / "costs.csv"
         metrics.to_csv(metrics_path, index=False)
         costs.to_csv(costs_path, index=False)
-        outputs = make_report_assets(samples_path, metrics_path, costs_path, tmp / "human_eval_summary.csv", tmp / "report_assets")
+        outputs = make_report_assets(samples_path, metrics_path, costs_path, tmp / "report_assets")
         assert (tmp / "report_assets/overview.md").exists()
         assert "metrics_markdown" in outputs
+        assert "human_markdown" not in outputs
 
 
 BOOTSTRAP_SMOKE_TESTS = (
@@ -1313,7 +1201,7 @@ BOOTSTRAP_SMOKE_TESTS = (
     test_metric_aggregation_contract,
     test_wer_computation,
     test_prepare_common_voice_metadata,
-    test_human_eval_and_report_assets,
+    test_report_assets_without_human_eval,
 )
 
 BOOTSTRAP_SMOKE_TEST_PROFILES = {

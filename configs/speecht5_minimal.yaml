@@ -67,13 +67,6 @@ evaluation:
     - train_gpu_hours
     - inference_seconds
     - cost_usd
-  human_eval:
-    evaluator_target_min: 15
-    evaluator_target_max: 20
-    scales:
-      mos: [1, 5]
-      smos: [1, 5]
-    paired_preference: true
   statistics:
     paired_test: wilcoxon
     confidence_interval: bootstrap
@@ -84,6 +77,5 @@ deliverables:
   samples: artifacts/evaluation/samples.csv
   metrics_summary: artifacts/evaluation/metrics_summary.csv
   cost_summary: artifacts/evaluation/cost_summary.csv
-  human_eval_summary: artifacts/evaluation/human_eval_summary.csv
   report_assets_dir: report_assets
   demo_dir: demo

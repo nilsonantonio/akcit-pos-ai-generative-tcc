@@ -62,10 +62,9 @@ Arquivos de controle:
 10. Rodar `SpeechT5 LoRA`.
 11. Rodar `Whisper`.
 12. Calcular `WER`, `speaker_similarity`, `NISQA`, `F0 RMSE`.
-13. Montar avaliacao humana.
-14. Agregar resultados.
-15. Gerar `report_assets/`.
-16. Abrir demo Gradio.
+13. Agregar resultados.
+14. Gerar `report_assets/`.
+15. Abrir demo Gradio.
 
 ## 3. Runbook: Mac M2 Pro Max host-native com MPS
 
@@ -227,21 +226,8 @@ git clone https://github.com/gabrielmittag/NISQA.git
 python3 scripts/compute_nisqa.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
 python3 scripts/compute_nisqa.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv --nisqa-path "$(pwd)/NISQA"
 python3 scripts/compute_f0_rmse.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
-python3 scripts/build_human_eval_pack.py --samples artifacts/evaluation/samples.csv --out-dir artifacts/human_eval_pack
-# Wrote 288 human evaluation rows to artifacts/human_eval_pack
-
-# OPCIONAL: Para fins de teste e desenvolvimento, voce pode simular votos humanos:
-python3 scripts/simulate_human_eval.py --input artifacts/human_eval_pack/human_eval_pack.csv --output artifacts/human_eval_pack/human_eval_pack.csv
-
-# preencha artifacts/human_eval_pack/human_eval_pack.csv linha a linha ouvindo o par de audios de cada batch_id
-# editar apenas: mos_left, mos_right, smos_left, smos_right, preferred_condition, notes
-# mos_* = naturalidade/qualidade percebida; smos_* = similaridade com a voz esperada; usar preferencialmente notas de 1 a 5
-# preferred_condition deve receber exatamente o valor de left_condition ou right_condition
-# nao altere: batch_id, prompt_id, speaker_id, left_sample_id, right_sample_id, left_condition, right_condition
-
-python3 scripts/import_human_eval_results.py --results artifacts/human_eval_pack/human_eval_pack.csv --out artifacts/evaluation/human_eval_summary.csv
 python3 scripts/aggregate_metrics.py --samples artifacts/evaluation/samples.csv --out-dir artifacts/evaluation
-python3 scripts/make_report_assets.py --samples artifacts/evaluation/samples.csv --metrics artifacts/evaluation/metrics_summary.csv --costs artifacts/evaluation/cost_summary.csv --human-eval artifacts/evaluation/human_eval_summary.csv --out-dir report_assets
+python3 scripts/make_report_assets.py --samples artifacts/evaluation/samples.csv --metrics artifacts/evaluation/metrics_summary.csv --costs artifacts/evaluation/cost_summary.csv --out-dir report_assets
 python3 demo/app.py --samples artifacts/evaluation/samples.csv
 ```
 
@@ -307,10 +293,8 @@ python3 scripts/compute_nisqa.py --samples artifacts/evaluation/samples.csv --ou
 export NISQA_PATH=/caminho/para/NISQA
 python3 scripts/compute_nisqa.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
 python3 scripts/compute_f0_rmse.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
-python3 scripts/build_human_eval_pack.py --samples artifacts/evaluation/samples.csv --out-dir artifacts/human_eval_pack
-python3 scripts/import_human_eval_results.py --results artifacts/human_eval_pack/human_eval_pack.csv --out artifacts/evaluation/human_eval_summary.csv
 python3 scripts/aggregate_metrics.py --samples artifacts/evaluation/samples.csv --out-dir artifacts/evaluation
-python3 scripts/make_report_assets.py --samples artifacts/evaluation/samples.csv --metrics artifacts/evaluation/metrics_summary.csv --costs artifacts/evaluation/cost_summary.csv --human-eval artifacts/evaluation/human_eval_summary.csv --out-dir report_assets
+python3 scripts/make_report_assets.py --samples artifacts/evaluation/samples.csv --metrics artifacts/evaluation/metrics_summary.csv --costs artifacts/evaluation/cost_summary.csv --out-dir report_assets
 python3 demo/app.py --samples artifacts/evaluation/samples.csv
 ```
 
@@ -365,6 +349,6 @@ Dentro do container, execute a mesma sequencia do runbook `Linux local com NVIDI
 ## 7. Criterios de encerramento
 
 - `artifacts/evaluation/samples.csv` com linhas `status=ok`
-- `metrics_summary.csv`, `cost_summary.csv` e `human_eval_summary.csv` preenchidos
+- `metrics_summary.csv` e `cost_summary.csv` preenchidos
 - `report_assets/` com tabelas e graficos
 - `demo/app.py` abrindo e tocando audios reais
