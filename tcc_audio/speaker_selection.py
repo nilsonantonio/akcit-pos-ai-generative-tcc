@@ -124,7 +124,7 @@ def select_speakers(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build a 4-speaker manifest from curated Common Voice metadata.")
-    parser.add_argument("--metadata", required=True, help="CSV using common_voice_curated_input_template.csv schema.")
+    parser.add_argument("--metadata", required=True, help="Path to the curated Common Voice metadata CSV.")
     parser.add_argument("--manifest-out", required=True, help="Output data_manifest.csv path.")
     parser.add_argument("--speaker-selection-out", required=True, help="Output speaker selection CSV path.")
     parser.add_argument("--speakers-per-gender", type=int, default=2)

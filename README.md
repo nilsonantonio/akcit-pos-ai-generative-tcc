@@ -14,8 +14,9 @@ O projeto implementa o plano operacional atualizado:
 
 - `configs/speecht5_minimal.yaml`: configuracao oficial do desenho experimental.
 - `data/prompts/ptbr_test_prompts.csv`: 24 prompts fixos em PT-BR, com texto cru e normalizado.
-- `data/manifests/data_manifest_template.csv`: schema do manifesto unico de dados.
-- `data/manifests/speaker_selection_template.csv`: template para selecao dos 4 speakers.
+- `data/manifests/common_voice_curated.csv`: metadados curados apos preprocessamento do Common Voice.
+- `data/manifests/data_manifest.csv`: manifesto consolidado usado nas etapas de treino e validacao.
+- `data/manifests/speaker_selection.csv`: selecao final de speakers usada nas etapas de embeddings e avaliacao.
 - `tcc_audio/`: pacote com validacao, matriz de runs, inferencia, metricas e relatorios.
 - `scripts/`: wrappers de linha de comando.
 - `demo/app.py`: demo Gradio minima para comparar amostras A/B/C.

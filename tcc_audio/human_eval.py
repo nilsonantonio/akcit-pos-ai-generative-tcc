@@ -90,7 +90,7 @@ def import_human_eval_results(results_path: str | Path, out_path: str | Path) ->
         raise SystemExit(
             f"Human evaluation results file not found: `{results_path}`. "
             "Fill either `artifacts/human_eval_pack/human_eval_pack.csv` or "
-            "`data/evaluation/human_eval_results_template.csv`, then pass that filled CSV to "
+            "another CSV with the same columns, then pass that filled CSV to "
             "`scripts/import_human_eval_results.py --results ...`."
         )
     results = read_csv(results_path)
