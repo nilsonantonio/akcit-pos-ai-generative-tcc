@@ -4,7 +4,6 @@ Manual operacional oficial para executar o projeto em:
 
 - `Mac M2 Pro Max host-native com MPS`
 - `Linux local com NVIDIA + Docker`
-- `Google Colab`
 - `RunPod com NVIDIA + Docker`
 
 ## Nota técnica
@@ -27,7 +26,6 @@ Referencias:
 | Mac com Docker Desktop GPU | Nao | Nao | Fora do escopo operacional |
 | Linux local + NVIDIA Docker | Sim | Sim | Requer RTX 3090 ou superior |
 | RunPod + NVIDIA Docker | Sim | Sim | Ambiente oficial de producao |
-| Google Colab | Sim | Parcial | Apenas piloto e validacao rapida |
 
 ## 1. Estrutura minima esperada
 
@@ -298,24 +296,7 @@ python3 scripts/make_report_assets.py --samples artifacts/evaluation/samples.csv
 python3 demo/app.py --samples artifacts/evaluation/samples.csv
 ```
 
-## 5. Runbook: Google Colab
-
-Objetivo: piloto curto de `SpeechT5 zero-shot`, `few-shot` e `LoRA`.
-
-Checklist:
-
-1. Abrir `notebooks/colab_smoke_test.ipynb`.
-2. Montar Google Drive.
-3. Clonar o projeto ou fazer upload do zip.
-4. Instalar `ffmpeg` e `requirements-linux-gpu.txt`.
-5. Rodar smoke test e um piloto curto de 1 speaker.
-
-Limites:
-
-- nao usar como ambiente oficial para as 400 amostras
-- usar para validar hiperparametros e estabilidade
-
-## 6. Runbook: RunPod com NVIDIA + Docker
+## 5. Runbook: RunPod com NVIDIA + Docker
 
 Objetivo: ambiente oficial de producao do TCC.
 

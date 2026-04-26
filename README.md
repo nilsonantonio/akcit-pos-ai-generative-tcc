@@ -231,12 +231,11 @@ python3 demo/app.py --samples artifacts/evaluation/samples.csv
 
 ## Ambientes
 
-- `MANUAL_EXECUCAO.md`: runbooks completos para `Mac M2 host-native com MPS`, `Linux local com NVIDIA + Docker`, `Google Colab` e `RunPod com NVIDIA + Docker`.
+- `MANUAL_EXECUCAO.md`: runbooks completos para `Mac M2 host-native com MPS`, `Linux local com NVIDIA + Docker` e `RunPod com NVIDIA + Docker`.
 - `requirements-macos-mps.txt`: dependencia para `macOS Apple Silicon` com `PyTorch MPS`.
 - `requirements-linux-gpu.txt`: dependencia para `Linux/RunPod` com `CUDA`.
 - `docker/docker-compose.nvidia.yml`: compose oficial para `Linux NVIDIA` e `RunPod`.
 - `docker/Dockerfile.cpu`: legado para analise/preprocess, nao e caminho oficial de GPU.
-- `notebooks/`: notebooks Colab de smoke test e piloto de treino.
 
 Regra operacional:
 
