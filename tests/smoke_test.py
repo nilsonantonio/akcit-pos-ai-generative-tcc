@@ -135,8 +135,12 @@ def test_run_matrix_generation() -> None:
         assert {"speecht5_zero_shot", "speecht5_few_shot_decoder_ft", "speecht5_lora"}.issubset(
             set(matrix["condition"])
         )
-        assert "parler_reference_optional" in set(matrix["condition"])
-        assert len(matrix[matrix["condition"].eq("parler_reference_optional")]) == 16
+        assert set(matrix["condition"]) == {
+            "speecht5_zero_shot",
+            "speecht5_few_shot_decoder_ft",
+            "speecht5_lora",
+        }
+        assert len(matrix) == 384
         speaker_selection = Path(tmpdir) / "speaker_selection.csv"
         embeddings = Path(tmpdir) / "speaker_embeddings.csv"
         pd.DataFrame(
@@ -204,7 +208,19 @@ def test_speaker_selection_from_curated_metadata() -> None:
         assert "audio_path" in manifest.columns
         assert "target_text_speecht5" in manifest.columns
         assert manifest.loc[0, "target_text_speecht5"] == 'Acao de teste com "aspas" para selecao de speaker.'
-        assert "parler_description" in speaker_selection.columns
+        assert set(speaker_selection.columns) == {
+            "speaker_id",
+            "source_speaker_id",
+            "gender",
+            "total_duration_s",
+            "selected_train_duration_s",
+            "selected_val_duration_s",
+            "reference_audio",
+            "reference_duration_s",
+            "license",
+            "source",
+            "notes",
+        }
 
 
 def test_speaker_embedding_config_resolution() -> None:

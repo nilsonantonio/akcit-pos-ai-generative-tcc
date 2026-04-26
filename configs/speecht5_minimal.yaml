@@ -55,16 +55,6 @@ conditions:
       preferred: lora_qkvo
       fallback: decoder_postnet_ft
     normalization_modes: [normalized]
-  - id: parler_reference_optional
-    label: Parler-TTS referencia opcional
-    regime: commercial_reference
-    model_name: parler-tts/parler-tts-mini-multilingual-v1.1
-    trainable: false
-    official_hypothesis_arm: false
-    uses_speaker_embeddings: false
-    speaker_subset_count: 2
-    prompt_subset_count: 8
-    normalization_modes: [normalized]
 
 evaluation:
   speaker_similarity_model: speechbrain/spkrec-ecapa-voxceleb

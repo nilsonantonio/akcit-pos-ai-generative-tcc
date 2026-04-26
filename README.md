@@ -7,7 +7,6 @@ O projeto implementa o plano operacional atualizado:
 - eixo principal em `SpeechT5`: `zero-shot`, `few-shot decoder fine-tune` e `LoRA`;
 - `Whisper` sem ajuste como avaliador de WER;
 - `SpeechBrain ECAPA` para embeddings e similaridade de speaker;
-- `Parler-TTS` como benchmark externo opcional para demo;
 - `BRSpeech-DF` como evidencia contextual, nao como braco principal.
 
 ## Estrutura
@@ -129,14 +128,6 @@ python3 scripts/run_speecht5_lora.py \
   --samples artifacts/evaluation/samples.csv \
   --checkpoint-dir artifacts/checkpoints/lora \
   --gpu-hourly-rate 0.0
-```
-
-Opcional:
-
-```bash
-python3 scripts/run_parler_reference.py \
-  --config configs/speecht5_minimal.yaml \
-  --samples artifacts/evaluation/samples.csv
 ```
 
 Se for necessario preencher custos de treino depois da execucao, o backfill usa `total_train_gpu_hours` quando a coluna estiver salva no `samples.csv` e, na falta dela, cai para `run_started_at` e `run_finished_at`:

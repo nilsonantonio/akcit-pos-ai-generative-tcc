@@ -60,13 +60,12 @@ Arquivos de controle:
 8. Rodar `SpeechT5 zero-shot`.
 9. Rodar `SpeechT5 few-shot decoder fine-tune`.
 10. Rodar `SpeechT5 LoRA`.
-11. Rodar `Parler-TTS` opcionalmente.
-12. Rodar `Whisper`.
-13. Calcular `WER`, `speaker_similarity`, `NISQA`, `F0 RMSE`.
-14. Montar avaliacao humana.
-15. Agregar resultados.
-16. Gerar `report_assets/`.
-17. Abrir demo Gradio.
+11. Rodar `Whisper`.
+12. Calcular `WER`, `speaker_similarity`, `NISQA`, `F0 RMSE`.
+13. Montar avaliacao humana.
+14. Agregar resultados.
+15. Gerar `report_assets/`.
+16. Abrir demo Gradio.
 
 ## 3. Runbook: Mac M2 Pro Max host-native com MPS
 
@@ -88,7 +87,7 @@ source .venv/bin/activate
 O bootstrap:
 
 - cria `.venv`
-- instala `requirements-macos-mps.txt`
+- instala `requirements-macos-mps.txt`, incluindo `pytest` para os smoke tests
 - clona `NISQA` em `./NISQA`
 - exige `ffmpeg` no host
 - valida suporte do Python a `lzma/_lzma`
@@ -577,7 +576,7 @@ bash scripts/bootstrap_nvidia_linux.sh
 
 O bootstrap:
 
-- instala `requirements-linux-gpu.txt`
+- instala `requirements-linux-gpu.txt`, incluindo `pytest` para os smoke tests
 - clona `NISQA` em `./NISQA`
 - exige `ffmpeg`
 - exige `nvidia-smi`
@@ -611,7 +610,6 @@ python3 scripts/init_samples.py --run-matrix artifacts/run_matrix.csv --speaker-
 python3 scripts/run_speecht5_zero_shot.py --config configs/speecht5_minimal.yaml --samples artifacts/evaluation/samples.csv
 python3 scripts/run_speecht5_few_shot.py --config configs/speecht5_minimal.yaml --manifest data/manifests/data_manifest.csv --samples artifacts/evaluation/samples.csv --checkpoint-dir artifacts/checkpoints/few_shot --gpu-hourly-rate 0.0
 python3 scripts/run_speecht5_lora.py --config configs/speecht5_minimal.yaml --manifest data/manifests/data_manifest.csv --samples artifacts/evaluation/samples.csv --checkpoint-dir artifacts/checkpoints/lora --gpu-hourly-rate 0.0
-python3 scripts/run_parler_reference.py --config configs/speecht5_minimal.yaml --samples artifacts/evaluation/samples.csv
 python3 scripts/run_whisper_batch.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
 python3 scripts/compute_wer.py --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv
 python3 scripts/compute_speaker_similarity.py --config configs/speecht5_minimal.yaml --samples artifacts/evaluation/samples.csv --out artifacts/evaluation/samples.csv

@@ -13,7 +13,6 @@ accelerate>=0.28
 peft>=0.10
 sentencepiece>=0.1.99
 speechbrain>=1.0
-parler-tts>=0.2
 matplotlib>=3.8
+pytest>=9.0
 python-dotenv==1.1.1
-

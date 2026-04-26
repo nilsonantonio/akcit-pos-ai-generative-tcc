@@ -89,7 +89,6 @@ def select_speakers(
                     "reference_duration_s": float(reference_row["duration_s"]),
                     "license": reference_row["license"],
                     "source": reference_row["source"],
-                    "parler_description": "A clear and natural Portuguese Brazilian voice, recorded in a clean studio.",
                     "notes": "Auto-selected from curated metadata; manually audit audio before training.",
                 }
             )
