@@ -79,6 +79,7 @@ from tcc_audio.samples import (
 from tcc_audio.speaker_selection import build_arg_parser as build_speaker_selection_arg_parser, select_speakers
 from tcc_audio.speaker_embeddings import build_arg_parser as build_speaker_embeddings_arg_parser, extract_speaker_embeddings
 from tcc_audio.speecht5_runner import (
+    _build_training_args,
     _build_condition_run_root,
     _apply_lora_adapter,
     _log_training_dataset_summary,
@@ -1710,7 +1711,6 @@ def test_extract_speaker_embeddings_override_wins_over_config() -> None:
 
         assert calls["source"] == "override/model"
         assert calls["run_opts"] == {"device": "cpu"}
-        assert calls["run_opts"] == {"device": "cpu"}
         assert int(frame.iloc[0]["embedding_dim"]) == 192
 
 
@@ -1778,6 +1778,84 @@ def test_compute_speaker_similarity_uses_configured_eval_model() -> None:
         assert calls["source"] == "speechbrain/spkrec-ecapa-voxceleb"
         assert calls["run_opts"] == {"device": "cpu"}
         assert float(updated.loc[updated["sample_id"].eq("s1"), "speaker_similarity"].iloc[0]) == 1.0
+
+
+def test_build_training_args_uses_warmup_steps() -> None:
+    class FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return False
+
+    class FakeTorch:
+        cuda = FakeCuda()
+
+    class FakeTrainingArguments:
+        __dataclass_fields__ = {
+            "output_dir": None,
+            "per_device_train_batch_size": None,
+            "per_device_eval_batch_size": None,
+            "gradient_accumulation_steps": None,
+            "learning_rate": None,
+            "warmup_steps": None,
+            "lr_scheduler_type": None,
+            "max_steps": None,
+            "save_strategy": None,
+            "save_steps": None,
+            "logging_strategy": None,
+            "logging_steps": None,
+            "load_best_model_at_end": None,
+            "metric_for_best_model": None,
+            "greater_is_better": None,
+            "weight_decay": None,
+            "max_grad_norm": None,
+            "gradient_checkpointing": None,
+            "report_to": None,
+            "fp16": None,
+            "dataloader_pin_memory": None,
+            "evaluation_strategy": None,
+        }
+
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    training_args = _build_training_args(
+        stack={"torch": FakeTorch(), "Seq2SeqTrainingArguments": FakeTrainingArguments},
+        output_dir="artifacts/checkpoints/test",
+        training_config={"warmup_steps": 0.05, "max_steps": 100},
+        has_eval_dataset=False,
+    )
+
+    assert training_args.kwargs["warmup_steps"] == 0.05
+    assert "warmup_ratio" not in training_args.kwargs
+
+
+def test_build_training_args_rejects_warmup_ratio() -> None:
+    class FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return False
+
+    class FakeTorch:
+        cuda = FakeCuda()
+
+    class FakeTrainingArguments:
+        __dataclass_fields__ = {"output_dir": None}
+
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    try:
+        _build_training_args(
+            stack={"torch": FakeTorch(), "Seq2SeqTrainingArguments": FakeTrainingArguments},
+            output_dir="artifacts/checkpoints/test",
+            training_config={"warmup_ratio": 0.05},
+            has_eval_dataset=False,
+        )
+    except ValueError as exc:
+        assert "warmup_ratio" in str(exc)
+        assert "warmup_steps" in str(exc)
+    else:
+        raise AssertionError("expected _build_training_args to reject training.warmup_ratio")
 
 
 def test_speecht5_runtime_loader_does_not_require_training_stack(monkeypatch) -> None:

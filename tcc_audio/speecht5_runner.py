@@ -571,6 +571,11 @@ def _build_training_args(
     fields = stack["Seq2SeqTrainingArguments"].__dataclass_fields__
     _validate_effective_batch_size(training_config)
 
+    if "warmup_ratio" in training_config:
+        raise ValueError(
+            "training.warmup_ratio is no longer supported. Replace it with training.warmup_steps."
+        )
+
     fp16_requested = bool(training_config.get("fp16", False))
     if fp16_requested and not torch.cuda.is_available():
         print("Warning: training.fp16=true ignored because CUDA is not available.")
@@ -581,7 +586,7 @@ def _build_training_args(
         "per_device_eval_batch_size": int(training_config.get("per_device_eval_batch_size", 2)),
         "gradient_accumulation_steps": int(training_config.get("gradient_accumulation_steps", 1)),
         "learning_rate": float(training_config.get("learning_rate", 5e-5)),
-        "warmup_ratio": float(training_config.get("warmup_ratio", 0.0)),
+        "warmup_steps": float(training_config.get("warmup_steps", 0)),
         "lr_scheduler_type": training_config.get("lr_scheduler_type", "linear"),
         "max_steps": int(training_config.get("max_steps", 100)),
         "save_strategy": training_config.get("save_strategy", "steps"),

@@ -46,7 +46,7 @@ conditions:
       gpu_hourly_rate: 0.0
       max_steps: 1500
       learning_rate: 3.0e-5
-      warmup_ratio: 0.05
+      warmup_steps: 500
       lr_scheduler_type: cosine
       per_device_train_batch_size: 2
       gradient_accumulation_steps: 2
@@ -88,7 +88,7 @@ conditions:
       gpu_hourly_rate: 0.0
       max_steps: 1000
       learning_rate: 5.0e-5
-      warmup_ratio: 0.05
+      warmup_steps: 500
       lr_scheduler_type: cosine
       per_device_train_batch_size: 2
       gradient_accumulation_steps: 2
