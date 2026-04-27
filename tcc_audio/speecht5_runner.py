@@ -600,6 +600,7 @@ def _build_training_args(
         "max_grad_norm": float(training_config.get("max_grad_norm", 1.0)),
         "gradient_checkpointing": bool(training_config.get("gradient_checkpointing", False)),
         "report_to": [],
+        "label_names": ["labels"],
         "fp16": bool(torch.cuda.is_available() and fp16_requested),
         "dataloader_pin_memory": bool(torch.cuda.is_available()),
     }

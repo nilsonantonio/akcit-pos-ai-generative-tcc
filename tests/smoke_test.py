@@ -80,6 +80,7 @@ from tcc_audio.speaker_selection import build_arg_parser as build_speaker_select
 from tcc_audio.speaker_embeddings import build_arg_parser as build_speaker_embeddings_arg_parser, extract_speaker_embeddings
 from tcc_audio.speecht5_runner import (
     _build_training_args,
+    _build_trainer,
     _build_condition_run_root,
     _apply_lora_adapter,
     _log_training_dataset_summary,
@@ -1810,6 +1811,7 @@ def test_build_training_args_uses_warmup_steps() -> None:
             "max_grad_norm": None,
             "gradient_checkpointing": None,
             "report_to": None,
+            "label_names": None,
             "fp16": None,
             "dataloader_pin_memory": None,
             "evaluation_strategy": None,
@@ -1826,6 +1828,7 @@ def test_build_training_args_uses_warmup_steps() -> None:
     )
 
     assert training_args.kwargs["warmup_steps"] == 0.05
+    assert training_args.kwargs["label_names"] == ["labels"]
     assert "warmup_ratio" not in training_args.kwargs
 
 
@@ -1856,6 +1859,46 @@ def test_build_training_args_rejects_warmup_ratio() -> None:
         assert "warmup_steps" in str(exc)
     else:
         raise AssertionError("expected _build_training_args to reject training.warmup_ratio")
+
+
+def test_build_trainer_uses_labels_only_for_speecht5_eval() -> None:
+    class FakeTrainer:
+        def __init__(self, model=None, args=None, train_dataset=None, eval_dataset=None, data_collator=None, tokenizer=None):
+            self.model = model
+            self.args = args
+            self.train_dataset = train_dataset
+            self.eval_dataset = eval_dataset
+            self.data_collator = data_collator
+            self.tokenizer = tokenizer
+            self.label_names = list(args.label_names) if args.label_names is not None else []
+
+        def evaluation_has_labels(self, inputs: dict[str, object]) -> bool:
+            return False if len(self.label_names) == 0 else all(inputs.get(key) is not None for key in self.label_names)
+
+    class FakeModel:
+        config = types.SimpleNamespace(reduction_factor=1)
+
+        def forward(self, input_ids=None, labels=None, stop_labels=None, speaker_embeddings=None, **kwargs):
+            return {"loss": 0.0}
+
+    class FakeProcessor:
+        def pad(self, *args, **kwargs):
+            raise AssertionError("pad should not be called in this test")
+
+    training_args = types.SimpleNamespace(label_names=["labels"])
+    with patch("tcc_audio.speecht5_runner._make_collator", return_value=object()):
+        trainer = _build_trainer(
+            stack={"Seq2SeqTrainer": FakeTrainer, "torch": object()},
+            model=FakeModel(),
+            training_args=training_args,
+            processor=FakeProcessor(),
+            train_dataset=[],
+            eval_dataset=[],
+        )
+
+    assert trainer.label_names == ["labels"]
+    assert trainer.evaluation_has_labels({"labels": object()})
+    assert not trainer.evaluation_has_labels({"stop_labels": object()})
 
 
 def test_speecht5_runtime_loader_does_not_require_training_stack(monkeypatch) -> None:
