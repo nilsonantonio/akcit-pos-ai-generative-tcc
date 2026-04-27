@@ -293,3 +293,15 @@ python3 demo/app.py \
 - `metrics_summary.csv` e `cost_summary.csv` preenchidos
 - `report_assets/` com tabelas e graficos
 - `demo/app.py` abrindo e tocando audios reais
+
+## 7. Execucao via notebooks no RunPod/Jupyter
+
+O diretorio `notebooks/` contem uma versao canonica deste mesmo pipeline para uso em pod com Jupyter e o repositorio clonado em `/workspace`.
+
+Ordem de execucao:
+
+- `notebooks/01_runpod_setup_e_dados.ipynb`
+- `notebooks/02_treino_e_inferencia.ipynb`
+- `notebooks/03_avaliacao_relatorio_e_demo.ipynb`
+
+Os notebooks espelham o pipeline canônico deste manual e executam os CLIs oficiais via `.venv/bin/python`.

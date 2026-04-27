@@ -25,6 +25,18 @@ Para setup e execução operacional:
 - veja [SETUP_AMBIENTES.md](SETUP_AMBIENTES.md)
 - veja [MANUAL_EXECUCAO.md](MANUAL_EXECUCAO.md)
 
+## Execucao via Jupyter/RunPod
+
+Para execucao no RunPod com Jupyter e o repositorio clonado em `/workspace`, use os notebooks canonicos em `notebooks/`:
+
+- `notebooks/01_runpod_setup_e_dados.ipynb`
+- `notebooks/02_treino_e_inferencia.ipynb`
+- `notebooks/03_avaliacao_relatorio_e_demo.ipynb`
+
+Eles espelham o pipeline do manual e executam os CLIs oficiais do projeto via `.venv/bin/python`, sem depender do kernel da `.venv`.
+
+Se a `.venv` ainda nao existir no pod, o notebook `01` inclui uma celula opcional para executar `bash scripts/bootstrap_runpod.sh`.
+
 ## O que este repositório é
 
 Pense neste projeto como um pequeno framework experimental, e não como um único script de treino.
