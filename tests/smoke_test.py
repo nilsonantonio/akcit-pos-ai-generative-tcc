@@ -45,10 +45,18 @@ from tcc_audio.speaker_selection import select_speakers
 from tcc_audio.speaker_embeddings import extract_speaker_embeddings
 from tcc_audio.speecht5_runner import (
     _apply_lora_adapter,
+    _log_training_dataset_summary,
     _load_speaker_embedding,
     _load_torch_stack,
     _load_training_stack,
     build_lora_arg_parser,
+)
+from tcc_audio.training_cleanup import (
+    build_cleanup_arg_parser,
+    build_remove_condition_arg_parser,
+    cleanup_training_results,
+    remove_condition,
+    resolve_cleanup_paths,
 )
 from tcc_audio.speecht5_text import count_unk_tokens, has_unk_tokens, normalize_text_for_speecht5
 from tcc_audio.wer import word_error_rate, compute_wer_from_asr
@@ -123,6 +131,40 @@ def _write_common_voice_metadata_inputs(
         encoding="utf-8",
     )
     return validated_tsv, validated_sentences_tsv, clip_durations_tsv
+
+
+def _write_cleanup_config(tmp: Path) -> Path:
+    config = tmp / "config.yaml"
+    config.write_text(
+        "project:\n"
+        "  primary_model: microsoft/speecht5_tts\n"
+        "  vocoder_model: microsoft/speecht5_hifigan\n"
+        "data:\n"
+        "  manifest_path: data/manifests/data_manifest.csv\n"
+        "conditions:\n"
+        "  - id: cond_a\n"
+        "    label: Cond A\n"
+        "    train_strategy: lora\n"
+        "    lora:\n"
+        "      r: 8\n"
+        "    training:\n"
+        "      scope: per_speaker\n"
+        "  - id: cond_b\n"
+        "    label: Cond B\n"
+        "    train_strategy: lora\n"
+        "    lora:\n"
+        "      r: 8\n"
+        "    training:\n"
+        "      scope: unique\n"
+        "deliverables:\n"
+        f"  run_matrix: {tmp / 'artifacts/run_matrix.csv'}\n"
+        f"  samples: {tmp / 'artifacts/evaluation/samples.csv'}\n"
+        f"  metrics_summary: {tmp / 'artifacts/evaluation/metrics_summary.csv'}\n"
+        f"  cost_summary: {tmp / 'artifacts/evaluation/cost_summary.csv'}\n"
+        f"  report_assets_dir: {tmp / 'report_assets'}\n",
+        encoding="utf-8",
+    )
+    return config
 
 
 def test_prompt_file_has_expected_contract() -> None:
@@ -313,6 +355,299 @@ def test_build_lora_arg_parser_accepts_repeated_condition_flags() -> None:
     )
 
     assert args.condition == ["cond_a", "cond_b"]
+
+
+def test_log_training_dataset_summary_for_per_speaker(capsys) -> None:
+    train_rows = pd.DataFrame(
+        [
+            {"speaker_id": "speaker_01", "duration_s": "120"},
+            {"speaker_id": "speaker_01", "duration_s": "180"},
+        ]
+    )
+
+    _log_training_dataset_summary(
+        condition_id="cond_a",
+        scope="per_speaker",
+        training_unit="speaker_01",
+        train_rows=train_rows,
+        phase="train:start",
+    )
+    _log_training_dataset_summary(
+        condition_id="cond_a",
+        scope="per_speaker",
+        training_unit="speaker_01",
+        train_rows=train_rows,
+        phase="train:end",
+    )
+
+    output = capsys.readouterr().out
+    assert "scope=per_speaker" in output
+    assert "speaker_id=speaker_01" in output
+    assert "dataset_minutes=5.00" in output
+    assert "[LoRA train:start]" in output
+    assert "[LoRA train:end]" in output
+
+
+def test_log_training_dataset_summary_for_unique(capsys) -> None:
+    train_rows = pd.DataFrame(
+        [
+            {"speaker_id": "speaker_01", "duration_s": "120"},
+            {"speaker_id": "speaker_01", "duration_s": "180"},
+            {"speaker_id": "speaker_02", "duration_s": "60"},
+        ]
+    )
+
+    _log_training_dataset_summary(
+        condition_id="cond_b",
+        scope="unique",
+        training_unit="unique",
+        train_rows=train_rows,
+        phase="train:start",
+    )
+    _log_training_dataset_summary(
+        condition_id="cond_b",
+        scope="unique",
+        training_unit="unique",
+        train_rows=train_rows,
+        phase="train:end",
+    )
+
+    output = capsys.readouterr().out
+    assert "scope=unique" in output
+    assert "speaker_count=2" in output
+    assert "speaker_01=5.00m" in output
+    assert "speaker_02=1.00m" in output
+    assert "[LoRA train:start]" in output
+    assert "[LoRA train:end]" in output
+
+
+def test_build_cleanup_arg_parser_and_resolve_defaults() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        config = _write_cleanup_config(tmp)
+        parser = build_cleanup_arg_parser()
+        args = parser.parse_args(["--config", str(config), "--condition", "cond_a"])
+        paths = resolve_cleanup_paths(config_path=args.config)
+
+    assert args.condition == ["cond_a"]
+    assert paths.samples_path == tmp / "artifacts/evaluation/samples.csv"
+    assert paths.evaluation_dir == tmp / "artifacts/evaluation"
+    assert paths.report_assets_dir == tmp / "report_assets"
+    assert paths.run_matrix_path == tmp / "artifacts/run_matrix.csv"
+
+
+def test_build_cleanup_arg_parser_accepts_aliases_and_all() -> None:
+    parser = build_cleanup_arg_parser()
+    args = parser.parse_args(["-c", "config.yaml", "-C", "all", "-y"])
+
+    assert args.config == "config.yaml"
+    assert args.condition == ["all"]
+    assert args.bypass is True
+
+
+def test_build_remove_condition_arg_parser_accepts_aliases() -> None:
+    parser = build_remove_condition_arg_parser()
+    args = parser.parse_args(["-c", "config.yaml", "-C", "cond_a", "-y"])
+
+    assert args.config == "config.yaml"
+    assert args.condition == ["cond_a"]
+    assert args.bypass is True
+
+
+def test_cleanup_training_results_requires_yes_confirmation() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        config = _write_cleanup_config(tmp)
+        with patch("builtins.input", return_value="no"):
+            try:
+                cleanup_training_results(config_path=config, condition_ids=["cond_a"])
+            except SystemExit as exc:
+                message = str(exc)
+            else:
+                raise AssertionError("expected cleanup confirmation to abort")
+
+    assert message == "Aborted by user."
+
+
+def test_cleanup_training_results_bypass_skips_confirmation() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        config = _write_cleanup_config(tmp)
+        with patch("builtins.input", side_effect=AssertionError("input should not be called")):
+            result = cleanup_training_results(config_path=config, condition_ids=["cond_a"], bypass=True)
+
+    assert result.condition_ids == ["cond_a"]
+
+
+def test_cleanup_training_results_removes_condition_artifacts() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        config = _write_cleanup_config(tmp)
+        samples_path = tmp / "artifacts/evaluation/samples.csv"
+        samples_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            [
+                {"condition": "cond_a", "checkpoint_step": "", "sample_id": "base_a"},
+                {"condition": "cond_a", "checkpoint_step": "500", "sample_id": "mat_a"},
+                {"condition": "cond_b", "checkpoint_step": "750", "sample_id": "mat_b"},
+            ]
+        ).to_csv(samples_path, index=False)
+        checkpoint_a = tmp / "artifacts/checkpoints/lora/cond_a"
+        checkpoint_a.mkdir(parents=True, exist_ok=True)
+        (checkpoint_a / "marker.txt").write_text("x", encoding="utf-8")
+        checkpoint_b = tmp / "artifacts/checkpoints/lora/cond_b"
+        checkpoint_b.mkdir(parents=True, exist_ok=True)
+        (checkpoint_b / "marker.txt").write_text("x", encoding="utf-8")
+        audio_a = tmp / "artifacts/audio/cond_a"
+        audio_a.mkdir(parents=True, exist_ok=True)
+        (audio_a / "sample.wav").write_text("x", encoding="utf-8")
+        for filename in ["metrics_summary.csv", "cost_summary.csv", "metrics_by_speaker.csv", "cost_by_speaker.csv"]:
+            target = tmp / "artifacts/evaluation" / filename
+            target.write_text("x", encoding="utf-8")
+        report_assets = tmp / "report_assets"
+        report_assets.mkdir(parents=True, exist_ok=True)
+        (report_assets / "overview.md").write_text("x", encoding="utf-8")
+
+        result = cleanup_training_results(
+            config_path=config,
+            condition_ids=["cond_a"],
+            checkpoint_dir=tmp / "artifacts/checkpoints/lora",
+            audio_base_dir=tmp / "artifacts/audio",
+            bypass=True,
+        )
+        remaining = load_samples(samples_path)
+        checkpoint_a_exists = checkpoint_a.exists()
+        checkpoint_b_exists = checkpoint_b.exists()
+        audio_a_exists = audio_a.exists()
+        report_assets_exists = report_assets.exists()
+        evaluation_files_exist = [
+            (tmp / "artifacts/evaluation" / filename).exists()
+            for filename in ["metrics_summary.csv", "cost_summary.csv", "metrics_by_speaker.csv", "cost_by_speaker.csv"]
+        ]
+
+        assert result.condition_ids == ["cond_a"]
+        assert result.removed_materialized_rows == 1
+        assert checkpoint_a_exists is False
+        assert checkpoint_b_exists is True
+        assert audio_a_exists is False
+        assert report_assets_exists is False
+        assert remaining["sample_id"].tolist() == ["base_a", "mat_b"]
+        assert evaluation_files_exist == [False, False, False, False]
+
+
+def test_cleanup_training_results_accepts_all() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        config = _write_cleanup_config(tmp)
+        samples_path = tmp / "artifacts/evaluation/samples.csv"
+        samples_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            [
+                {"condition": "cond_a", "checkpoint_step": "", "sample_id": "base_a"},
+                {"condition": "cond_a", "checkpoint_step": "500", "sample_id": "mat_a"},
+                {"condition": "cond_b", "checkpoint_step": "750", "sample_id": "mat_b"},
+            ]
+        ).to_csv(samples_path, index=False)
+        for condition_id in ["cond_a", "cond_b"]:
+            checkpoint_root = tmp / "artifacts/checkpoints/lora" / condition_id
+            checkpoint_root.mkdir(parents=True, exist_ok=True)
+            audio_root = tmp / "artifacts/audio" / condition_id
+            audio_root.mkdir(parents=True, exist_ok=True)
+
+        result = cleanup_training_results(
+            config_path=config,
+            condition_ids=["all"],
+            checkpoint_dir=tmp / "artifacts/checkpoints/lora",
+            audio_base_dir=tmp / "artifacts/audio",
+            bypass=True,
+        )
+        remaining = load_samples(samples_path)
+        checkpoint_a_exists = (tmp / "artifacts/checkpoints/lora/cond_a").exists()
+        checkpoint_b_exists = (tmp / "artifacts/checkpoints/lora/cond_b").exists()
+        audio_a_exists = (tmp / "artifacts/audio/cond_a").exists()
+        audio_b_exists = (tmp / "artifacts/audio/cond_b").exists()
+
+        assert result.condition_ids == ["cond_a", "cond_b"]
+        assert result.removed_materialized_rows == 2
+        assert remaining["sample_id"].tolist() == ["base_a"]
+        assert checkpoint_a_exists is False
+        assert checkpoint_b_exists is False
+        assert audio_a_exists is False
+        assert audio_b_exists is False
+
+
+def test_cleanup_training_results_rejects_all_with_specific_conditions() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        config = _write_cleanup_config(tmp)
+        try:
+            cleanup_training_results(config_path=config, condition_ids=["all", "cond_a"], bypass=True)
+        except ValueError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("expected invalid all combination to fail")
+
+    assert "cannot be combined" in message
+
+
+def test_remove_condition_rejects_all() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        config = _write_cleanup_config(tmp)
+        try:
+            remove_condition(config_path=config, condition_id="all", bypass=True)
+        except ValueError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("expected remove_condition to reject all")
+
+    assert "specific LoRA condition id" in message
+
+
+def test_remove_condition_removes_condition_from_samples_and_config() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        config = _write_cleanup_config(tmp)
+        samples_path = tmp / "artifacts/evaluation/samples.csv"
+        samples_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            [
+                {"condition": "cond_a", "checkpoint_step": "", "sample_id": "base_a"},
+                {"condition": "cond_a", "checkpoint_step": "500", "sample_id": "mat_a"},
+                {"condition": "cond_b", "checkpoint_step": "", "sample_id": "base_b"},
+            ]
+        ).to_csv(samples_path, index=False)
+        run_matrix = tmp / "artifacts/run_matrix.csv"
+        run_matrix.parent.mkdir(parents=True, exist_ok=True)
+        run_matrix.write_text("run_id\nx\n", encoding="utf-8")
+        checkpoint_a = tmp / "artifacts/checkpoints/lora/cond_a"
+        checkpoint_a.mkdir(parents=True, exist_ok=True)
+        audio_a = tmp / "artifacts/audio/cond_a"
+        audio_a.mkdir(parents=True, exist_ok=True)
+
+        result = remove_condition(
+            config_path=config,
+            condition_id="cond_a",
+            checkpoint_dir=tmp / "artifacts/checkpoints/lora",
+            audio_base_dir=tmp / "artifacts/audio",
+            bypass=True,
+        )
+        remaining = load_samples(samples_path)
+        config_text = config.read_text(encoding="utf-8")
+        run_matrix_exists = run_matrix.exists()
+        checkpoint_a_exists = checkpoint_a.exists()
+        audio_a_exists = audio_a.exists()
+
+        assert result.cleanup.removed_materialized_rows == 1
+        assert result.removed_base_rows == 1
+        assert result.updated_config is True
+        assert result.removed_run_matrix is True
+        assert remaining["sample_id"].tolist() == ["base_b"]
+        assert "id: cond_a" not in config_text
+        assert "id: cond_b" in config_text
+        assert run_matrix_exists is False
+        assert checkpoint_a_exists is False
+        assert audio_a_exists is False
 
 
 def test_speaker_selection_from_curated_metadata() -> None:

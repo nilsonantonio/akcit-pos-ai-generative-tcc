@@ -397,6 +397,44 @@ def _iter_training_units(
     return units
 
 
+def _dataset_minutes(train_rows: pd.DataFrame) -> float:
+    duration_s = pd.to_numeric(train_rows["duration_s"], errors="coerce").fillna(0.0)
+    return float(duration_s.sum() / 60.0)
+
+
+def _speaker_dataset_minutes(train_rows: pd.DataFrame) -> list[tuple[str, float]]:
+    speaker_minutes: list[tuple[str, float]] = []
+    for speaker_id in sorted(train_rows["speaker_id"].astype(str).unique()):
+        speaker_rows = train_rows[train_rows["speaker_id"].eq(speaker_id)].copy()
+        if speaker_rows.empty:
+            continue
+        speaker_minutes.append((str(speaker_id), _dataset_minutes(speaker_rows)))
+    return speaker_minutes
+
+
+def _log_training_dataset_summary(
+    *,
+    condition_id: str,
+    scope: str,
+    training_unit: str,
+    train_rows: pd.DataFrame,
+    phase: str,
+) -> None:
+    if scope == "per_speaker":
+        print(
+            f"[LoRA {phase}] condition={condition_id} scope=per_speaker "
+            f"speaker_id={training_unit} dataset_minutes={_dataset_minutes(train_rows):.2f}"
+        )
+        return
+
+    speaker_minutes = _speaker_dataset_minutes(train_rows)
+    details = ", ".join(f"{speaker_id}={minutes:.2f}m" for speaker_id, minutes in speaker_minutes)
+    print(
+        f"[LoRA {phase}] condition={condition_id} scope=unique "
+        f"speaker_count={len(speaker_minutes)} dataset_minutes_by_speaker=[{details}]"
+    )
+
+
 def _build_checkpoint_root(checkpoint_dir: str | Path, condition_id: str, run_ts: str, training_unit: str) -> Path:
     return Path(checkpoint_dir) / condition_id / run_ts / training_unit
 
@@ -575,10 +613,24 @@ def _train_condition(
             eval_dataset=dataset_class(unit_val_rows, processor) if not unit_val_rows.empty else None,
         )
 
+        _log_training_dataset_summary(
+            condition_id=condition_id,
+            scope=training_scope,
+            training_unit=training_unit,
+            train_rows=unit_train_rows,
+            phase="train:start",
+        )
         started = time.perf_counter()
         trainer.train()
         elapsed_hours = (time.perf_counter() - started) / 3600.0
         trainer.save_model()
+        _log_training_dataset_summary(
+            condition_id=condition_id,
+            scope=training_scope,
+            training_unit=training_unit,
+            train_rows=unit_train_rows,
+            phase="train:end",
+        )
 
         checkpoints = _checkpoint_dirs(output_dir)
         if not checkpoints:
