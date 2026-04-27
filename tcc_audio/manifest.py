@@ -8,6 +8,12 @@ from pathlib import Path
 
 import pandas as pd
 
+from tcc_audio.cli_defaults import (
+    DEFAULT_MANIFEST_PATH,
+    DEFAULT_PROMPTS_PATH,
+    load_cli_config,
+    resolve_data_path,
+)
 from tcc_audio.io import read_csv, read_yaml
 from tcc_audio.schema import (
     DATA_MANIFEST_REQUIRED_COLUMNS,
@@ -213,9 +219,9 @@ def print_report(report: ValidationReport) -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Validate the TCC data manifest.")
-    parser.add_argument("--manifest", required=True, help="Path to data manifest CSV.")
-    parser.add_argument("--prompts", help="Path to PT-BR prompts CSV.")
-    parser.add_argument("--config", help="Optional experiment YAML to validate SpeechT5 tokenization compatibility.")
+    parser.add_argument("-m", "--manifest", help="Path to data manifest CSV.")
+    parser.add_argument("-p", "--prompts", help="Path to PT-BR prompts CSV.")
+    parser.add_argument("-c", "--config", help="Optional experiment YAML to validate SpeechT5 tokenization compatibility.")
     parser.add_argument("--check-files", action="store_true", help="Check reference_audio paths.")
     parser.add_argument("--project-root", default=".", help="Root for relative audio paths.")
     return parser
@@ -223,12 +229,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    config_path, config = load_cli_config(args.config)
+    manifest_path = args.manifest or str(resolve_data_path(config, "manifest_path", DEFAULT_MANIFEST_PATH))
+    prompts_path = args.prompts or str(resolve_data_path(config, "prompts_path", DEFAULT_PROMPTS_PATH))
     report = validate_data_manifest(
-        args.manifest,
-        prompts_path=args.prompts,
+        manifest_path,
+        prompts_path=prompts_path,
         check_files=args.check_files,
         project_root=args.project_root,
-        config_path=args.config,
+        config_path=config_path,
     )
     print_report(report)
     return 0 if report.ok else 1

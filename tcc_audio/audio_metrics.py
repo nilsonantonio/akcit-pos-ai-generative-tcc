@@ -211,6 +211,6 @@ def compute_f0_rmse(samples_path: str | Path, out_path: str | Path, sample_rate:
 
 def build_arg_parser(metric_name: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=f"Compute {metric_name} for generated samples.")
-    parser.add_argument("--samples", required=True)
-    parser.add_argument("--out", required=True)
+    parser.add_argument("-s", "--samples")
+    parser.add_argument("-o", "--out")
     return parser

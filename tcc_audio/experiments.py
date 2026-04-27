@@ -8,6 +8,11 @@ from typing import Any, Mapping
 
 import pandas as pd
 
+from tcc_audio.cli_defaults import (
+    DEFAULT_RUN_MATRIX_PATH,
+    load_cli_config,
+    resolve_deliverable_path,
+)
 from tcc_audio.io import ensure_parent_dir, read_csv, read_yaml
 
 
@@ -102,17 +107,21 @@ def generate_run_matrix(config_path: str | Path, out_path: str | Path | None = N
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate the SpeechT5 minimal run matrix.")
-    parser.add_argument("--config", required=True, help="Path to experiment YAML config.")
-    parser.add_argument("--out", help="Output CSV path.")
+    parser.add_argument("-c", "--config", help="Path to experiment YAML config.")
+    parser.add_argument("-o", "--out", help="Output CSV path.")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    matrix = generate_run_matrix(args.config, args.out)
+    config_path, config = load_cli_config(args.config)
+    if config_path is None:
+        raise SystemExit("Config not found. Pass --config or keep configs/speecht5_minimal.yaml available.")
+    out_path = args.out or str(resolve_deliverable_path(config, "run_matrix", DEFAULT_RUN_MATRIX_PATH))
+    matrix = generate_run_matrix(config_path, out_path)
     print(f"Generated {len(matrix)} runs")
-    if args.out:
-        print(f"Wrote {args.out}")
+    if out_path:
+        print(f"Wrote {out_path}")
     return 0
 
 

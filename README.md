@@ -37,6 +37,41 @@ Eles espelham o pipeline do manual e executam os CLIs oficiais do projeto via `.
 
 Se a `.venv` ainda nao existir no pod, o notebook `01` inclui uma celula opcional para executar `bash scripts/bootstrap_runpod.sh`.
 
+## Execucao operacional
+
+O passo a passo oficial do pipeline está em [MANUAL_EXECUCAO.md](MANUAL_EXECUCAO.md).
+
+Este `README.md` fica focado em:
+
+- explicar o desenho do framework
+- esclarecer os contratos de dados e artefatos
+- registrar as decisões conceituais do pipeline
+
+O manual operacional fica focado em:
+
+- comandos mínimos do fluxo canônico
+- sobrescritas e modos avançados
+- manutenção e cleanup
+
+## Como a interface CLI foi pensada
+
+Os CLIs do projeto seguem três regras simples:
+
+1. o pipeline canônico deve funcionar com o menor número possível de flags
+2. `--config` existe para resolver defaults a partir do YAML quando isso fizer sentido
+3. parâmetros de intenção experimental continuam explícitos, mesmo quando paths triviais viram defaults
+
+Na prática, isso significa:
+
+- comandos de preparação, treino, métricas e agregação usam o layout canônico do repo por padrão
+- quando `--config` é informado, os comandos priorizam os paths definidos em `data` e `deliverables`
+- flags como `--condition`, `--gpu-hourly-rate` e `--speaker-target-count` continuam sendo sobrescritas deliberadas, não ruído operacional
+
+Uma distinção importante:
+
+- `select_speakers.py --speaker-target-count` controla a curadoria e o tamanho do subconjunto selecionado para o manifesto
+- `data.speaker_target_count` no YAML controla quantos `speaker_XX` entram no desenho consumido por `run_matrix.csv`
+
 ## O que este repositório é
 
 Pense neste projeto como um pequeno framework experimental, e não como um único script de treino.
@@ -71,6 +106,8 @@ O fluxo ponta a ponta é:
 10. `métricas`: rodar `Whisper`, `WER`, `speaker similarity`, `NISQA`, `F0 RMSE`, custo e latência
 11. `agregação`: resumir os resultados por condição analítica
 12. `report/app`: gerar assets e abrir a comparação qualitativa entre checkpoints
+
+A forma operacional mínima desse fluxo, com os CLIs reduzidos e as sobrescritas separadas, está documentada em [MANUAL_EXECUCAO.md](MANUAL_EXECUCAO.md).
 
 A unidade analítica principal do framework é `checkpoint_label=<condicao>@step<k>`.
 
@@ -748,5 +785,7 @@ Se a sua meta for apenas testar novas condições `LoRA`, pense no ciclo abaixo:
 3. inicializar ou reutilizar `samples.csv`
 4. treinar e materializar checkpoints
 5. comparar checkpoints nas métricas e no app
+
+Para os comandos concretos de cada etapa, use [MANUAL_EXECUCAO.md](MANUAL_EXECUCAO.md) como fonte operacional primária.
 
 Esse é o valor principal do repositório: oferecer um caminho reproduzível para transformar hipóteses de adaptação `LoRA` em experimentos comparáveis, auditáveis e comunicáveis.

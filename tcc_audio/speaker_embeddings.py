@@ -13,6 +13,13 @@ from tcc_audio.config import (
     resolve_tts_speaker_embedding_dim,
     resolve_tts_speaker_embedding_model,
 )
+from tcc_audio.cli_defaults import (
+    DEFAULT_EMBEDDINGS_DIR,
+    DEFAULT_EMBEDDINGS_INDEX_PATH,
+    DEFAULT_SPEAKER_SELECTION_PATH,
+    load_cli_config,
+    resolve_data_path,
+)
 from tcc_audio.io import ensure_parent_dir, read_csv
 from tcc_audio.speechbrain_compat import encode_audio_path, load_encoder_classifier
 
@@ -70,10 +77,10 @@ def extract_speaker_embeddings(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Extract SpeechT5-compatible speaker embeddings from reference audio.")
-    parser.add_argument("--config", help="Optional experiment config used to resolve the TTS embedding model.")
-    parser.add_argument("--speaker-selection", required=True, help="Path to speaker_selection.csv.")
-    parser.add_argument("--out-index", required=True, help="Output CSV with embedding metadata.")
-    parser.add_argument("--out-dir", required=True, help="Directory for .npy embedding files.")
+    parser.add_argument("-c", "--config", help="Optional experiment config used to resolve the TTS embedding model.")
+    parser.add_argument("-s", "--speaker-selection", help="Path to speaker_selection.csv.")
+    parser.add_argument("-o", "--out-index", help="Output CSV with embedding metadata.")
+    parser.add_argument("-d", "--out-dir", help="Directory for .npy embedding files.")
     parser.add_argument("--model-name", help="Override the TTS speaker embedding model from config.")
     parser.add_argument("--expected-dim", type=int, help="Override the expected TTS embedding dimension from config.")
     return parser
@@ -81,15 +88,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    config_path, config = load_cli_config(args.config)
+    speaker_selection_path = args.speaker_selection or str(
+        resolve_data_path(config, "speaker_selection_path", DEFAULT_SPEAKER_SELECTION_PATH)
+    )
+    out_index = args.out_index or str(
+        resolve_data_path(config, "speaker_embeddings_index", DEFAULT_EMBEDDINGS_INDEX_PATH)
+    )
+    out_dir = args.out_dir or str(Path(out_index).parent if out_index else DEFAULT_EMBEDDINGS_DIR)
     frame = extract_speaker_embeddings(
-        config_path=args.config,
-        speaker_selection_path=args.speaker_selection,
-        out_index=args.out_index,
-        out_dir=args.out_dir,
+        config_path=config_path,
+        speaker_selection_path=speaker_selection_path,
+        out_index=out_index,
+        out_dir=out_dir,
         model_name=args.model_name,
         expected_dim=args.expected_dim,
     )
-    print(f"Wrote {len(frame)} speaker embeddings to {args.out_index}")
+    print(f"Wrote {len(frame)} speaker embeddings to {out_index}")
     return 0
 
 

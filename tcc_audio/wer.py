@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from tcc_audio.cli_defaults import DEFAULT_SAMPLES_PATH, load_cli_config, resolve_samples_path
 from tcc_audio.runtime import load_samples, refresh_sample_status, save_samples
 
 
@@ -62,15 +63,19 @@ def compute_wer_from_asr(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Compute WER from Whisper transcript text in samples.csv.")
-    parser.add_argument("--samples", required=True, help="Path to samples.csv.")
-    parser.add_argument("--out", required=True, help="Output samples.csv path.")
+    parser.add_argument("-c", "--config", help="Optional experiment config used to resolve samples.csv.")
+    parser.add_argument("-s", "--samples", help="Path to samples.csv.")
+    parser.add_argument("-o", "--out", help="Output samples.csv path.")
     parser.add_argument("--asr-column", default="asr_text")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    samples = compute_wer_from_asr(args.samples, args.out, args.asr_column)
+    _, config = load_cli_config(args.config)
+    samples_path = args.samples or str(resolve_samples_path(config) if config else DEFAULT_SAMPLES_PATH)
+    out_path = args.out or samples_path
+    samples = compute_wer_from_asr(samples_path, out_path, args.asr_column)
     computed = pd.to_numeric(samples["wer"], errors="coerce").notna().sum()
     print(f"Computed WER for {computed} rows")
     return 0

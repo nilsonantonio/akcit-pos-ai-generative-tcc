@@ -7,6 +7,13 @@ import csv
 from datetime import datetime
 from pathlib import Path
 
+from tcc_audio.cli_defaults import (
+    DEFAULT_SAMPLES_PATH,
+    DEFAULT_TRAINING_COST_SUMMARY_PATH,
+    load_cli_config,
+    resolve_samples_path,
+)
+
 SUMMARY_COLUMNS = [
     "condition",
     "speaker_id",
@@ -178,26 +185,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "falling back to run_started_at/run_finished_at in samples.csv."
         )
     )
-    parser.add_argument("--samples", required=True, help="Path to artifacts/evaluation/samples.csv.")
+    parser.add_argument("-c", "--config", help="Optional experiment config used to resolve samples.csv.")
+    parser.add_argument("-s", "--samples", help="Path to artifacts/evaluation/samples.csv.")
     parser.add_argument(
         "--gpu-hourly-rate",
         type=float,
         required=True,
         help="GPU hourly rate used to convert derived runtime hours into cost_usd.",
     )
-    parser.add_argument("--out", help="Optional output samples.csv path. Defaults to overwriting --samples.")
-    parser.add_argument("--summary-out", help="Optional path for a CSV summary of the backfill operation.")
+    parser.add_argument("-o", "--out", help="Optional output samples.csv path. Defaults to overwriting --samples.")
+    parser.add_argument("-u", "--summary-out", help="Optional path for a CSV summary of the backfill operation.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing train_gpu_hours and cost_usd cells.")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    _, config = load_cli_config(args.config)
+    samples_path = args.samples or str(resolve_samples_path(config) if config else DEFAULT_SAMPLES_PATH)
+    out_path = args.out or samples_path
+    summary_out_path = args.summary_out or str(DEFAULT_TRAINING_COST_SUMMARY_PATH)
     _, summary = backfill_training_costs(
-        samples_path=args.samples,
+        samples_path=samples_path,
         gpu_hourly_rate=args.gpu_hourly_rate,
-        out_path=args.out,
-        summary_out_path=args.summary_out,
+        out_path=out_path,
+        summary_out_path=summary_out_path,
         overwrite=args.overwrite,
     )
     print(f"Updated {len(summary)} condition/speaker groups")

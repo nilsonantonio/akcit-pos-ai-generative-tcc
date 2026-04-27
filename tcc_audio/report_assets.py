@@ -7,6 +7,14 @@ from pathlib import Path
 
 import pandas as pd
 
+from tcc_audio.cli_defaults import (
+    DEFAULT_COSTS_PATH,
+    DEFAULT_METRICS_PATH,
+    DEFAULT_REPORT_ASSETS_DIR,
+    DEFAULT_SAMPLES_PATH,
+    load_cli_config,
+    resolve_deliverable_path,
+)
 from tcc_audio.io import ensure_parent_dir, read_csv
 from tcc_audio.runtime import load_samples
 
@@ -112,17 +120,23 @@ def make_report_assets(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build report assets for the TCC presentation.")
-    parser.add_argument("--samples", required=True)
-    parser.add_argument("--metrics", required=True)
-    parser.add_argument("--costs", required=True)
-    parser.add_argument("--out-dir", required=True)
+    parser.add_argument("-c", "--config", help="Optional experiment config used to resolve deliverable paths.")
+    parser.add_argument("-s", "--samples")
+    parser.add_argument("-m", "--metrics")
+    parser.add_argument("-k", "--costs")
+    parser.add_argument("-o", "--out-dir")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    outputs = make_report_assets(args.samples, args.metrics, args.costs, args.out_dir)
-    print(f"Wrote {len(outputs)} report asset files to {args.out_dir}")
+    _, config = load_cli_config(args.config)
+    samples_path = args.samples or str(resolve_deliverable_path(config, "samples", DEFAULT_SAMPLES_PATH))
+    metrics_path = args.metrics or str(resolve_deliverable_path(config, "metrics_summary", DEFAULT_METRICS_PATH))
+    costs_path = args.costs or str(resolve_deliverable_path(config, "cost_summary", DEFAULT_COSTS_PATH))
+    out_dir = args.out_dir or str(resolve_deliverable_path(config, "report_assets_dir", DEFAULT_REPORT_ASSETS_DIR))
+    outputs = make_report_assets(samples_path, metrics_path, costs_path, out_dir)
+    print(f"Wrote {len(outputs)} report asset files to {out_dir}")
     return 0
 
 

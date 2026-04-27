@@ -8,6 +8,16 @@ from typing import Iterable
 
 import pandas as pd
 
+from tcc_audio.cli_defaults import (
+    DEFAULT_AUDIO_BASE_DIR,
+    DEFAULT_EMBEDDINGS_INDEX_PATH,
+    DEFAULT_RUN_MATRIX_PATH,
+    DEFAULT_SAMPLES_PATH,
+    DEFAULT_SPEAKER_SELECTION_PATH,
+    load_cli_config,
+    resolve_data_path,
+    resolve_deliverable_path,
+)
 from tcc_audio.io import ensure_parent_dir, read_csv
 from tcc_audio.runtime import load_samples, load_speaker_reference_map, save_samples, stringify_csv_value
 from tcc_audio.schema import EVAL_SAMPLES_REQUIRED_COLUMNS, SAMPLES_OPTIONAL_COLUMNS
@@ -182,24 +192,34 @@ def materialize_checkpoint_samples(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Initialize artifacts/evaluation/samples.csv from run_matrix.csv.")
-    parser.add_argument("--run-matrix", required=True, help="Path to artifacts/run_matrix.csv.")
-    parser.add_argument("--out", required=True, help="Output samples.csv path.")
-    parser.add_argument("--audio-base-dir", default="artifacts/audio")
-    parser.add_argument("--speaker-selection", help="Optional speaker_selection.csv for reference_audio lookup.")
-    parser.add_argument("--speaker-embeddings", help="Optional TTS speaker_embeddings.csv for synthesis embedding lookup.")
+    parser.add_argument("-c", "--config", help="Optional experiment config used to resolve run_matrix/samples paths.")
+    parser.add_argument("-r", "--run-matrix", help="Path to artifacts/run_matrix.csv.")
+    parser.add_argument("-o", "--out", help="Output samples.csv path.")
+    parser.add_argument("-a", "--audio-base-dir", default=str(DEFAULT_AUDIO_BASE_DIR))
+    parser.add_argument("-s", "--speaker-selection", help="Optional speaker_selection.csv for reference_audio lookup.")
+    parser.add_argument("-e", "--speaker-embeddings", help="Optional TTS speaker_embeddings.csv for synthesis embedding lookup.")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    samples = initialize_samples(
-        args.run_matrix,
-        args.out,
-        args.audio_base_dir,
-        speaker_selection_path=args.speaker_selection,
-        speaker_embeddings_path=args.speaker_embeddings,
+    _, config = load_cli_config(args.config)
+    run_matrix_path = args.run_matrix or str(resolve_deliverable_path(config, "run_matrix", DEFAULT_RUN_MATRIX_PATH))
+    out_path = args.out or str(resolve_deliverable_path(config, "samples", DEFAULT_SAMPLES_PATH))
+    speaker_selection_path = args.speaker_selection or str(
+        resolve_data_path(config, "speaker_selection_path", DEFAULT_SPEAKER_SELECTION_PATH)
     )
-    print(f"Wrote {len(samples)} sample rows to {args.out}")
+    speaker_embeddings_path = args.speaker_embeddings or str(
+        resolve_data_path(config, "speaker_embeddings_index", DEFAULT_EMBEDDINGS_INDEX_PATH)
+    )
+    samples = initialize_samples(
+        run_matrix_path,
+        out_path,
+        args.audio_base_dir,
+        speaker_selection_path=speaker_selection_path,
+        speaker_embeddings_path=speaker_embeddings_path,
+    )
+    print(f"Wrote {len(samples)} sample rows to {out_path}")
     return 0
 
 

@@ -18,6 +18,7 @@ from typing import Any, Iterable, Mapping
 import numpy as np
 import pandas as pd
 
+from tcc_audio.cli_defaults import DEFAULT_AUDIO_BASE_DIR
 from tcc_audio.io import ensure_parent_dir, read_csv, read_yaml
 from tcc_audio.runtime import (
     EmbeddingIndex,
@@ -813,12 +814,13 @@ def run_lora_pipeline(
 
 def build_lora_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the SpeechT5 LoRA checkpoint-evaluation pipeline.")
-    parser.add_argument("--config", required=True)
-    parser.add_argument("--samples", required=True)
-    parser.add_argument("--manifest", required=True)
-    parser.add_argument("--checkpoint-dir", required=True)
-    parser.add_argument("--audio-base-dir", default="artifacts/audio")
+    parser.add_argument("-c", "--config")
+    parser.add_argument("-s", "--samples")
+    parser.add_argument("-m", "--manifest")
+    parser.add_argument("-k", "--checkpoint-dir")
+    parser.add_argument("-a", "--audio-base-dir", default=str(DEFAULT_AUDIO_BASE_DIR))
     parser.add_argument(
+        "-C",
         "--condition",
         action="append",
         default=[],

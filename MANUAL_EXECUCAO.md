@@ -1,14 +1,38 @@
 # Manual de Execucao do TCC de Audio
 
-Manual operacional oficial para executar o projeto em:
+Guia operacional principal do projeto para:
 
 - `Mac M2 Pro Max host-native com MPS`
 - `Linux local com NVIDIA + Docker`
 - `RunPod com NVIDIA host-native`
 
-## 1. Estrutura minima esperada
+## Visao curta do pipeline
 
-Diretorios relevantes:
+O fluxo oficial do repositório é:
+
+1. baixar o `Common Voice PT`
+2. preparar metadados `pt-BR`
+3. preprocessar audio
+4. selecionar speakers e validar manifesto
+5. extrair embeddings
+6. gerar `run_matrix.csv` e `samples.csv`
+7. treinar `SpeechT5 LoRA` e materializar checkpoints
+8. rodar métricas automáticas
+9. agregar resultados
+10. gerar `report_assets/`
+11. abrir a demo Gradio
+
+Este manual prioriza o caminho feliz: primeiro os comandos mínimos do pipeline canônico, depois uma seção separada para sobrescritas e casos avançados.
+
+## Pre-requisitos e convencoes
+
+- faça o setup do ambiente em [SETUP_AMBIENTES.md](SETUP_AMBIENTES.md)
+- execute os comandos a partir da raiz do repositório
+- no `Mac` e no `RunPod`, mantenha a `.venv` ativa
+- no `Linux NVIDIA + Docker`, execute o pipeline já dentro do container
+- aceite os termos do dataset no site do Mozilla Data Collective antes do download
+
+Estrutura esperada ao longo da execução:
 
 - `data/raw/common_voice_pt/`
 - `data/processed/common_voice_pt/`
@@ -19,242 +43,299 @@ Diretorios relevantes:
 - `artifacts/evaluation/`
 - `report_assets/`
 
-Arquivos de controle:
+Arquivos de controle principais:
 
 - `configs/speecht5_minimal.yaml`
 - `artifacts/run_matrix.csv`
 - `artifacts/evaluation/samples.csv`
 
-## 2. Pipeline canônico
+Convencao da interface CLI:
 
-1. Aceitar os termos do Common Voice no site do Mozilla Data Collective e exportar o token de API.
-2. Baixar e extrair o dataset `pt` para `data/raw/common_voice_pt/`.
-3. Preparar metadados do subconjunto `pt-BR`.
-4. Preprocessar audio para WAV mono.
-5. Selecionar globalmente os speakers alvo e validar manifesto.
-6. Extrair embeddings de speaker.
-7. Gerar matriz e ledger de amostras.
-8. Rodar as condicionais `SpeechT5 LoRA` configuradas no YAML.
-9. Materializar checkpoints e gerar audios por checkpoint salvo.
-10. Rodar `Whisper`.
-11. Calcular `WER`, `speaker_similarity`, `NISQA`, `F0 RMSE`.
-12. Agregar resultados.
-13. Gerar `report_assets/`.
-14. Abrir demo Gradio.
+- quando `--config` é informado, os comandos priorizam os paths definidos no YAML
+- quando `--config` não é informado, os comandos usam os paths canônicos do repositório
+- parâmetros de intenção operacional continuam explícitos no fluxo principal, como `--speaker-target-count`
 
-## 3. Como usar este manual
+## Pipeline canônico
 
-Escolha e prepare o ambiente correspondente em [SETUP_AMBIENTES.md](/Users/nilsonantonio/des/datascience/akcit/pos/generative-ai/14-tcc/src-light/SETUP_AMBIENTES.md).
-
-Depois do setup:
-
-- no `Mac` e no `RunPod`, mantenha a `.venv` ativa
-- no `Linux NVIDIA + Docker`, entre no container e rode o pipeline a partir da raiz do projeto
-
-## 4. Execução passo a passo do pipeline
-
-Antes do download, aceite os termos do dataset no site do Mozilla Data Collective e exporte o token de acesso.
+Exporte o token do Mozilla Data Collective:
 
 ```bash
 export MOZILLA_DATA_COLLECTIVE_API_KEY="seu_token_aqui"
 ```
 
-Baixe e extraia o subconjunto `pt` do Common Voice.
+Baixe e extraia o `Common Voice PT`:
 
 ```bash
-python3 scripts/download_common_voice_pt.py \
-  --out-dir data/raw/common_voice_pt
+python3 scripts/download_common_voice_pt.py
 ```
 
-Converta os metadados brutos em um CSV operacional do projeto.
+Prepare o CSV operacional `pt-BR`:
+
+```bash
+python3 scripts/prepare_common_voice_metadata.py
+```
+
+Preprocesse os audios para WAV mono:
+
+```bash
+python3 scripts/preprocess_audio_dataset.py
+```
+
+Selecione os speakers da curadoria e gere o manifesto:
+
+```bash
+python3 scripts/select_speakers.py --speaker-target-count 1000
+```
+
+Esse parâmetro controla a curadoria dos speakers selecionados para o manifesto. Ele é diferente de `data.speaker_target_count` no YAML, que controla quantos `speaker_XX` entram no desenho consumido por `run_matrix.csv`.
+
+Registre o inventário hierárquico dos dados:
+
+```bash
+python3 scripts/log_dataset_inventory.py
+```
+
+Valide manifesto e prompts antes do treino:
+
+```bash
+python3 scripts/validate_manifest.py --check-files
+```
+
+Extraia os embeddings de síntese:
+
+```bash
+python3 scripts/extract_speaker_embeddings.py
+```
+
+Gere a matriz oficial de execução:
+
+```bash
+python3 scripts/generate_run_matrix.py
+```
+
+Inicialize o ledger `samples.csv`:
+
+```bash
+python3 scripts/init_samples.py
+```
+
+Execute o pipeline LoRA e materialize checkpoints:
+
+```bash
+python3 scripts/run_speecht5_lora.py
+```
+
+Sem `--condition`, o comando percorre todas as condicionais LoRA do YAML em sequência.
+
+Transcreva os audios gerados com Whisper:
+
+```bash
+python3 scripts/run_whisper_batch.py
+```
+
+Calcule `WER`:
+
+```bash
+python3 scripts/compute_wer.py
+```
+
+Calcule `speaker_similarity`:
+
+```bash
+python3 scripts/compute_speaker_similarity.py
+```
+
+Calcule `NISQA`:
+
+```bash
+python3 scripts/compute_nisqa.py
+```
+
+O comando procura um checkout válido em `./NISQA` por padrão.
+
+Calcule `F0 RMSE`:
+
+```bash
+python3 scripts/compute_f0_rmse.py
+```
+
+Agregue os resultados:
+
+```bash
+python3 scripts/aggregate_metrics.py
+```
+
+Gere os assets finais do relatório:
+
+```bash
+python3 scripts/make_report_assets.py
+```
+
+Abra a demo de inspeção qualitativa:
+
+```bash
+python3 demo/app.py
+```
+
+## Sobrescritas e Execucoes Avancadas
+
+### Config e paths
+
+Use `--config` quando quiser que os defaults sejam resolvidos a partir de outro YAML:
+
+```bash
+python3 scripts/generate_run_matrix.py --config configs/experimento_alternativo.yaml
+python3 scripts/run_speecht5_lora.py --config configs/experimento_alternativo.yaml
+python3 scripts/make_report_assets.py --config configs/experimento_alternativo.yaml
+```
+
+Quando sobrescrever paths manualmente:
+
+- use isso se quiser gravar artefatos fora do layout canônico do repositório
+- priorize sobrescrever apenas o que realmente mudou
+
+Exemplos:
 
 ```bash
 python3 scripts/prepare_common_voice_metadata.py \
-  --tsv data/raw/common_voice_pt/validated.tsv \
-  --clips-dir data/raw/common_voice_pt/clips \
-  --locale pt \
-  --variant pt-BR \
-  --out data/manifests/common_voice_metadata.csv
-```
+  --tsv /mnt/dados/common_voice/validated.tsv \
+  --clips-dir /mnt/dados/common_voice/clips \
+  --out data/manifests/common_voice_metadata_alt.csv
 
-Preprocesse os audios para o formato canonico usado no experimento.
-
-```bash
-python3 scripts/preprocess_audio_dataset.py \
-  --metadata data/manifests/common_voice_metadata.csv \
-  --out-dir data/processed/common_voice_pt \
-  --out-metadata data/manifests/common_voice_processed.csv
-```
-
-Selecione os speakers alvo e materialize o manifesto principal do experimento.
-
-```bash
-python3 scripts/select_speakers.py \
-  --metadata data/manifests/common_voice_processed.csv \
-  --speaker-target-count 1000 \
-  --manifest-out data/manifests/data_manifest.csv \
-  --speaker-selection-out data/manifests/speaker_selection.csv
-```
-
-Registre um inventario hierarquico dos dados preparados e selecionados.
-
-```bash
-python3 scripts/log_dataset_inventory.py \
-  --config configs/speecht5_minimal.yaml \
-  --json-out artifacts/dataset_inventory.json
-```
-
-O comando gera um relatorio no console e grava um JSON com o inventario hierarquico de `data/raw`, `data/processed` e `selected_speakers`.
-
-Valide o manifesto e os prompts antes de iniciar treino e inferência.
-
-```bash
-python3 scripts/validate_manifest.py \
-  --manifest data/manifests/data_manifest.csv \
-  --config configs/speecht5_minimal.yaml \
-  --prompts data/prompts/ptbr_test_prompts.csv \
-  --check-files
-```
-
-Extraia os embeddings de speaker usados pelas etapas de sintese.
-
-```bash
-python3 scripts/extract_speaker_embeddings.py \
-  --config configs/speecht5_minimal.yaml \
-  --speaker-selection data/manifests/speaker_selection.csv \
-  --out-index artifacts/embeddings/speaker_embeddings.csv \
-  --out-dir artifacts/embeddings
-```
-
-Gere a matriz de execucao a partir da configuracao do experimento.
-
-```bash
-python3 scripts/generate_run_matrix.py \
-  --config configs/speecht5_minimal.yaml \
-  --out artifacts/run_matrix.csv
-```
-
-Materialize o ledger inicial de amostras que sera enriquecido nas proximas etapas.
-
-```bash
 python3 scripts/init_samples.py \
-  --run-matrix artifacts/run_matrix.csv \
-  --speaker-selection data/manifests/speaker_selection.csv \
-  --speaker-embeddings artifacts/embeddings/speaker_embeddings.csv \
-  --out artifacts/evaluation/samples.csv
+  --run-matrix artifacts/run_matrix_ablation.csv \
+  --out artifacts/evaluation/samples_ablation.csv
 ```
 
-Execute o treino LoRA e a materializacao dos checkpoints avaliados.
+Impacto esperado:
+
+- você passa a desacoplar a execução do layout padrão do repo
+- os próximos comandos precisam apontar para os novos artefatos, ou receber `--config` que resolva esses mesmos caminhos
+
+### Selecao e escopo
+
+Sobrescreva a curadoria dos speakers quando quiser variar o tamanho do subconjunto selecionado:
+
+```bash
+python3 scripts/select_speakers.py --speaker-target-count 200
+```
+
+Impacto esperado:
+
+- muda o conjunto de speakers elegíveis no manifesto
+- não altera, por si só, quantos `speaker_XX` entram na `run_matrix`
+
+Para alterar o desenho consumido no treino e na inferência, edite o YAML:
+
+- `data.speaker_target_count`
+- `conditions[].speaker_subset_count`
+- `conditions[].prompt_subset_count`
+
+### Treino LoRA
+
+Reexecute apenas um subconjunto de condicionais:
 
 ```bash
 python3 scripts/run_speecht5_lora.py \
-  --config configs/speecht5_minimal.yaml \
-  --manifest data/manifests/data_manifest.csv \
-  --samples artifacts/evaluation/samples.csv \
-  --checkpoint-dir artifacts/checkpoints/lora
+  --condition speecht5_lora_conservative \
+  --condition speecht5_lora_unique
 ```
 
-Sem `--condition`, o script percorre todas as condicionais LoRA do YAML em sequencia.
-
-Defina `training.gpu_hourly_rate` dentro de cada condicional LoRA no YAML. Use `--gpu-hourly-rate` apenas quando quiser sobrescrever globalmente a taxa configurada nas condicionais durante aquela execucao.
-
-Cada checkpoint salvo em `checkpoint-<step>` vira um braco independente de avaliacao e materializa novas linhas no `samples.csv`.
-
-Se ocorrer `CUDA out of memory` em `RTX 4090 24 GB`, reduza `per_device_train_batch_size` para `1` e aumente `gradient_accumulation_steps` para `4`.
-
-Transcreva os audios gerados com Whisper para preparar o calculo de WER.
+Sobrescreva globalmente a taxa de GPU da chamada atual:
 
 ```bash
-python3 scripts/run_whisper_batch.py \
-  --samples artifacts/evaluation/samples.csv \
-  --out artifacts/evaluation/samples.csv
+python3 scripts/run_speecht5_lora.py --gpu-hourly-rate 1.75
 ```
 
-Calcule a taxa de erro de palavras a partir das transcricoes do ASR.
+Impacto esperado:
+
+- `--condition` reduz o escopo do treino sem editar o YAML
+- `--gpu-hourly-rate` só afeta a execução corrente; o valor estrutural continua no bloco `training` de cada condicional
+
+Se ocorrer `CUDA out of memory` em `RTX 4090 24 GB`, o primeiro ajuste recomendado é:
+
+- reduzir `per_device_train_batch_size` para `1`
+- aumentar `gradient_accumulation_steps` para `4`
+
+### Metricas
+
+Force reprocessamento do Whisper mesmo com `asr_text` já preenchido:
+
+```bash
+python3 scripts/run_whisper_batch.py --all
+```
+
+Use outra coluna de transcrição para o cálculo de `WER`:
+
+```bash
+python3 scripts/compute_wer.py --asr-column custom_asr_text
+```
+
+Aponte explicitamente para outro checkout do `NISQA`:
+
+```bash
+python3 scripts/compute_nisqa.py --nisqa-path /opt/NISQA
+```
+
+Troque o modelo de similaridade de speaker apenas para a chamada atual:
+
+```bash
+python3 scripts/compute_speaker_similarity.py --model-name speechbrain/spkrec-ecapa-voxceleb
+```
+
+Impacto esperado:
+
+- essas flags alteram a forma de avaliação, não a estrutura do experimento
+- se você mudar uma métrica ou modelo de avaliação, regenere os agregados e `report_assets/`
+
+### Outputs e execucao in-place
+
+Os comandos que atualizam `samples.csv` escrevem no mesmo arquivo quando `--out` é omitido:
+
+- `scripts/run_whisper_batch.py`
+- `scripts/compute_wer.py`
+- `scripts/compute_speaker_similarity.py`
+- `scripts/compute_nisqa.py`
+- `scripts/compute_f0_rmse.py`
+
+Se quiser preservar o arquivo atual e gerar uma variante:
 
 ```bash
 python3 scripts/compute_wer.py \
   --samples artifacts/evaluation/samples.csv \
-  --out artifacts/evaluation/samples.csv
+  --out artifacts/evaluation/samples_wer_reprocessado.csv
 ```
 
-Calcule a similaridade entre speaker de referencia e speaker sintetizado.
-
-```bash
-python3 scripts/compute_speaker_similarity.py \
-  --config configs/speecht5_minimal.yaml \
-  --samples artifacts/evaluation/samples.csv \
-  --out artifacts/evaluation/samples.csv
-```
-
-Calcule a metrica perceptual NISQA usando o checkout local validado no setup.
-
-```bash
-python3 scripts/compute_nisqa.py \
-  --samples artifacts/evaluation/samples.csv \
-  --out artifacts/evaluation/samples.csv \
-  --nisqa-path "$(pwd)/NISQA"
-```
-
-Calcule a divergencia de frequencia fundamental entre referencia e sintese.
-
-```bash
-python3 scripts/compute_f0_rmse.py \
-  --samples artifacts/evaluation/samples.csv \
-  --out artifacts/evaluation/samples.csv
-```
-
-Agregue os resultados por condicao e gere os CSVs sumarizados de metricas e custos.
-
-```bash
-python3 scripts/aggregate_metrics.py \
-  --samples artifacts/evaluation/samples.csv \
-  --out-dir artifacts/evaluation
-```
-
-Gere os assets finais que serao usados no relatorio do experimento.
-
-```bash
-python3 scripts/make_report_assets.py \
-  --samples artifacts/evaluation/samples.csv \
-  --metrics artifacts/evaluation/metrics_summary.csv \
-  --costs artifacts/evaluation/cost_summary.csv \
-  --out-dir report_assets
-```
-
-## 5. Comandos utilitários
-
-Reexecute apenas um subconjunto de condicionais LoRA do YAML.
-
-```bash
-python3 scripts/run_speecht5_lora.py \
-  --config configs/speecht5_minimal.yaml \
-  --manifest data/manifests/data_manifest.csv \
-  --samples artifacts/evaluation/samples.csv \
-  --checkpoint-dir artifacts/checkpoints/lora \
-  --condition speecht5_lora_conservative \
-  --condition speecht5_lora_unique
-```
-
-Se precisar sobrescrever a taxa de todas as condicionais selecionadas nessa chamada, adicione `--gpu-hourly-rate <valor>`.
-
-Preencha custos de treino depois da execucao, quando necessario.
+O mesmo vale para `backfill`:
 
 ```bash
 python3 scripts/backfill_training_costs.py \
-  --samples artifacts/evaluation/samples.csv \
   --gpu-hourly-rate 0.0 \
-  --summary-out artifacts/evaluation/manual_training_costs_summary.csv
+  --out artifacts/evaluation/samples_costs_manual.csv \
+  --summary-out artifacts/evaluation/manual_training_costs_summary_alt.csv
 ```
 
-Remova os rastros materializados de treino de uma condicional especifica.
+Impacto esperado:
+
+- sem `--out`, o fluxo principal permanece simples e incremental
+- com `--out`, você cria ramificações de artefatos e precisa carregá-las explicitamente nas etapas seguintes
+
+## Manutencao e cleanup
+
+Preencha custos de treino depois da execução, quando necessário:
+
+```bash
+python3 scripts/backfill_training_costs.py --gpu-hourly-rate 0.0
+```
+
+Remova os rastros materializados de uma condicional:
 
 ```bash
 python3 scripts/clear_speecht5_training_results.py \
   --condition speecht5_lora_unique
 ```
 
-Remova os rastros materializados de varias condicionais especificas.
+Remova várias condicionais materializadas:
 
 ```bash
 python3 scripts/clear_speecht5_training_results.py \
@@ -262,16 +343,15 @@ python3 scripts/clear_speecht5_training_results.py \
   --condition speecht5_lora_unique
 ```
 
-Remova todos os treinos LoRA materializados do experimento.
+Remova todos os treinos LoRA materializados do experimento:
 
 ```bash
-python3 scripts/clear_speecht5_training_results.py \
-  --condition all
+python3 scripts/clear_speecht5_training_results.py --condition all
 ```
 
-Esse cleanup remove checkpoints, audios materializados, linhas materializadas no `samples.csv`, agregados globais em `artifacts/evaluation/` e o diretorio `report_assets/`.
+Esse cleanup remove checkpoints, audios materializados, linhas materializadas no `samples.csv`, agregados em `artifacts/evaluation/` e `report_assets/`.
 
-Remova uma condicional inteira do experimento e invalide a matriz quando aplicavel.
+Remova uma condicional inteira do experimento:
 
 ```bash
 python3 scripts/remove_speecht5_condition.py \
@@ -280,28 +360,26 @@ python3 scripts/remove_speecht5_condition.py \
 
 Esse fluxo encadeia o cleanup com `bypass` interno, remove as linhas base da condicional no `samples.csv`, remove a condicional do bloco `conditions:` do config e invalida `deliverables.run_matrix` quando o arquivo existir.
 
-Abra a demo para inspecao manual dos audios gerados.
+## Artefatos esperados
 
-```bash
-python3 demo/app.py \
-  --samples artifacts/evaluation/samples.csv
-```
+Ao final do pipeline canônico, espere encontrar:
 
-## 6. Criterios de encerramento
+- `artifacts/evaluation/samples.csv` com linhas materializadas e métricas preenchidas
+- `artifacts/evaluation/metrics_summary.csv`
+- `artifacts/evaluation/cost_summary.csv`
+- `artifacts/evaluation/metrics_by_speaker.csv`
+- `artifacts/evaluation/cost_by_speaker.csv`
+- `report_assets/` com tabelas e gráficos
+- `demo/app.py` abrindo e servindo audios reais
 
-- `artifacts/evaluation/samples.csv` com linhas `status=ok`
-- `metrics_summary.csv` e `cost_summary.csv` preenchidos
-- `report_assets/` com tabelas e graficos
-- `demo/app.py` abrindo e tocando audios reais
+## Execucao via notebooks no RunPod/Jupyter
 
-## 7. Execucao via notebooks no RunPod/Jupyter
+O diretório `notebooks/` contém a versão canônica deste mesmo fluxo para execução em pod com Jupyter e repositório clonado em `/workspace`.
 
-O diretorio `notebooks/` contem uma versao canonica deste mesmo pipeline para uso em pod com Jupyter e o repositorio clonado em `/workspace`.
-
-Ordem de execucao:
+Ordem recomendada:
 
 - `notebooks/01_runpod_setup_e_dados.ipynb`
 - `notebooks/02_treino_e_inferencia.ipynb`
 - `notebooks/03_avaliacao_relatorio_e_demo.ipynb`
 
-Os notebooks espelham o pipeline canônico deste manual e executam os CLIs oficiais via `.venv/bin/python`.
+Os notebooks espelham o pipeline mínimo deste manual e executam os CLIs oficiais via `.venv/bin/python`.

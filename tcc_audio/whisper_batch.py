@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from tcc_audio.cli_defaults import DEFAULT_SAMPLES_PATH, load_cli_config, resolve_samples_path
+from tcc_audio.config import resolve_asr_model
 from tcc_audio.runtime import load_samples, now_utc_iso, refresh_sample_status, save_samples
 
 
@@ -56,17 +58,22 @@ def run_whisper_batch(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Whisper on all generated audio samples.")
-    parser.add_argument("--samples", required=True)
-    parser.add_argument("--out", required=True)
-    parser.add_argument("--model-name", default="openai/whisper-small")
+    parser.add_argument("-c", "--config", help="Optional experiment config used to resolve evaluation.asr.name.")
+    parser.add_argument("-s", "--samples")
+    parser.add_argument("-o", "--out")
+    parser.add_argument("--model-name")
     parser.add_argument("--all", action="store_true", help="Recompute ASR even when asr_text already exists.")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    run_whisper_batch(args.samples, args.out, args.model_name, only_missing=not args.all)
-    print(f"Updated ASR transcripts in {args.out}")
+    _, config = load_cli_config(args.config)
+    samples_path = args.samples or str(resolve_samples_path(config) if config else DEFAULT_SAMPLES_PATH)
+    out_path = args.out or samples_path
+    model_name = args.model_name or resolve_asr_model(config)
+    run_whisper_batch(samples_path, out_path, model_name, only_missing=not args.all)
+    print(f"Updated ASR transcripts in {out_path}")
     return 0
 
 

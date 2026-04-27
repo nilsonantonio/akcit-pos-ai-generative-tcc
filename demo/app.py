@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from tcc_audio.cli_defaults import DEFAULT_SAMPLES_PATH, load_cli_config, resolve_samples_path
 from tcc_audio.runtime import load_samples
 
 
@@ -101,7 +102,8 @@ def build_app(samples_path: str | Path):
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the minimal Gradio demo.")
-    parser.add_argument("--samples", required=True, help="Path to artifacts/evaluation/samples.csv.")
+    parser.add_argument("-c", "--config", help="Optional experiment config used to resolve samples.csv.")
+    parser.add_argument("-s", "--samples", help="Path to artifacts/evaluation/samples.csv.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7860)
     return parser
@@ -109,7 +111,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    app = build_app(args.samples)
+    _, config = load_cli_config(args.config)
+    samples_path = args.samples or str(resolve_samples_path(config) if config else DEFAULT_SAMPLES_PATH)
+    app = build_app(samples_path)
     app.launch(server_name=args.host, server_port=args.port)
     return 0
 

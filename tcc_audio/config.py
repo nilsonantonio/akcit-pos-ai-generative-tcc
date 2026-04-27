@@ -10,6 +10,7 @@ from tcc_audio.io import read_yaml
 DEFAULT_TTS_SPEAKER_EMBEDDING_MODEL = "speechbrain/spkrec-xvect-voxceleb"
 DEFAULT_TTS_SPEAKER_EMBEDDING_DIM = 512
 DEFAULT_SPEAKER_SIMILARITY_MODEL = "speechbrain/spkrec-ecapa-voxceleb"
+DEFAULT_ASR_MODEL = "openai/whisper-small"
 
 
 def load_experiment_config(config_path: str | Path | None) -> dict[str, Any]:
@@ -48,4 +49,15 @@ def resolve_speaker_similarity_model(config: Mapping[str, Any] | None = None) ->
     value = evaluation.get("speaker_similarity_model")
     if not value:
         return DEFAULT_SPEAKER_SIMILARITY_MODEL
+    return str(value)
+
+
+def resolve_asr_model(config: Mapping[str, Any] | None = None) -> str:
+    evaluation = _config_section(config, "evaluation")
+    asr = evaluation.get("asr", {})
+    if not isinstance(asr, Mapping):
+        return DEFAULT_ASR_MODEL
+    value = asr.get("name")
+    if not value:
+        return DEFAULT_ASR_MODEL
     return str(value)

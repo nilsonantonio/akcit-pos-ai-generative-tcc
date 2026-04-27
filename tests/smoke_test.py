@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tcc_audio.common_voice import prepare_common_voice_metadata
+from tcc_audio.audio_preprocess import build_arg_parser as build_audio_preprocess_arg_parser
 from tcc_audio.common_voice_download import (
     download_common_voice_pt,
     request_dataset_download_session,
@@ -30,6 +31,26 @@ from tcc_audio.audio_metrics import (
     _resolve_nisqa_root,
     compute_speaker_similarity,
 )
+from tcc_audio.cli_defaults import (
+    DEFAULT_AUDIO_BASE_DIR,
+    DEFAULT_EMBEDDINGS_INDEX_PATH,
+    DEFAULT_MANIFEST_PATH,
+    DEFAULT_PROCESSED_METADATA_PATH,
+    DEFAULT_PROMPTS_PATH,
+    DEFAULT_RAW_CLIPS_DIR,
+    DEFAULT_RAW_METADATA_PATH,
+    DEFAULT_RAW_TSV,
+    DEFAULT_REPORT_ASSETS_DIR,
+    DEFAULT_RUN_MATRIX_PATH,
+    DEFAULT_SAMPLES_PATH,
+    DEFAULT_SPEAKER_SELECTION_PATH,
+    load_cli_config,
+    resolve_data_path,
+    resolve_deliverable_path,
+    resolve_sample_rate,
+    resolve_samples_path,
+)
+from tcc_audio.common_voice import build_arg_parser as build_common_voice_arg_parser
 from tcc_audio.config import (
     DEFAULT_SPEAKER_SIMILARITY_MODEL,
     DEFAULT_TTS_SPEAKER_EMBEDDING_DIM,
@@ -43,14 +64,19 @@ from tcc_audio.dataset_inventory import (
     render_dataset_inventory,
     resolve_inventory_paths,
 )
-from tcc_audio.experiments import generate_run_matrix
+from tcc_audio.experiments import build_arg_parser as build_run_matrix_arg_parser, generate_run_matrix
 from tcc_audio.evaluation import aggregate_metrics
-from tcc_audio.manifest import validate_data_manifest, validate_prompts
-from tcc_audio.report_assets import make_report_assets
+from tcc_audio.manifest import build_arg_parser as build_manifest_arg_parser, validate_data_manifest, validate_prompts
+from tcc_audio.report_assets import build_arg_parser as build_report_assets_arg_parser, make_report_assets
 from tcc_audio.runtime import load_samples
-from tcc_audio.samples import initialize_samples, materialize_checkpoint_samples, reset_condition_checkpoint_rows
-from tcc_audio.speaker_selection import select_speakers
-from tcc_audio.speaker_embeddings import extract_speaker_embeddings
+from tcc_audio.samples import (
+    build_arg_parser as build_samples_arg_parser,
+    initialize_samples,
+    materialize_checkpoint_samples,
+    reset_condition_checkpoint_rows,
+)
+from tcc_audio.speaker_selection import build_arg_parser as build_speaker_selection_arg_parser, select_speakers
+from tcc_audio.speaker_embeddings import build_arg_parser as build_speaker_embeddings_arg_parser, extract_speaker_embeddings
 from tcc_audio.speecht5_runner import (
     _build_condition_run_root,
     _apply_lora_adapter,
@@ -73,7 +99,8 @@ from tcc_audio.training_cleanup import (
     resolve_cleanup_paths,
 )
 from tcc_audio.speecht5_text import count_unk_tokens, has_unk_tokens, normalize_text_for_speecht5
-from tcc_audio.wer import word_error_rate, compute_wer_from_asr
+from tcc_audio.whisper_batch import build_arg_parser as build_whisper_arg_parser, main as whisper_main
+from tcc_audio.wer import build_arg_parser as build_wer_arg_parser, compute_wer_from_asr, main as wer_main, word_error_rate
 
 
 class MockUrlopenResponse:
@@ -221,6 +248,118 @@ def test_prompt_file_has_expected_contract() -> None:
     assert report.ok, report.errors
     assert report.row_count == 24
     assert report.summary["commercial_subset_count"] == 8
+
+
+def test_build_common_voice_arg_parser_uses_canonical_defaults() -> None:
+    parser = build_common_voice_arg_parser()
+    args = parser.parse_args([])
+
+    assert args.tsv == str(DEFAULT_RAW_TSV)
+    assert args.clips_dir == str(DEFAULT_RAW_CLIPS_DIR)
+    assert args.out == str(DEFAULT_RAW_METADATA_PATH)
+    assert args.locale == "pt"
+    assert args.variant == "pt-BR"
+
+
+def test_build_audio_preprocess_arg_parser_uses_canonical_defaults() -> None:
+    parser = build_audio_preprocess_arg_parser()
+    args = parser.parse_args([])
+
+    assert args.metadata == str(DEFAULT_RAW_METADATA_PATH)
+    assert args.out_dir == "data/processed/common_voice_pt"
+    assert args.out_metadata == str(DEFAULT_PROCESSED_METADATA_PATH)
+    assert args.sample_rate is None
+
+
+def test_build_speaker_selection_arg_parser_accepts_aliases() -> None:
+    parser = build_speaker_selection_arg_parser()
+    args = parser.parse_args(
+        [
+            "-m",
+            "processed.csv",
+            "-o",
+            "manifest.csv",
+            "-s",
+            "selection.csv",
+            "-n",
+            "1000",
+        ]
+    )
+
+    assert args.metadata == "processed.csv"
+    assert args.manifest_out == "manifest.csv"
+    assert args.speaker_selection_out == "selection.csv"
+    assert args.speaker_target_count == 1000
+
+
+def test_load_cli_config_and_resolve_paths_from_yaml() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        config = tmp / "config.yaml"
+        config.write_text(
+            "data:\n"
+            f"  prompts_path: {tmp / 'prompts.csv'}\n"
+            f"  manifest_path: {tmp / 'manifest.csv'}\n"
+            f"  speaker_selection_path: {tmp / 'speaker_selection.csv'}\n"
+            f"  speaker_embeddings_index: {tmp / 'speaker_embeddings.csv'}\n"
+            "  sample_rate: 22050\n"
+            "deliverables:\n"
+            f"  run_matrix: {tmp / 'run_matrix.csv'}\n"
+            f"  samples: {tmp / 'samples.csv'}\n"
+            f"  report_assets_dir: {tmp / 'report_assets'}\n",
+            encoding="utf-8",
+        )
+
+        config_path, payload = load_cli_config(config)
+
+    assert config_path == config
+    assert resolve_data_path(payload, "manifest_path", DEFAULT_MANIFEST_PATH) == tmp / "manifest.csv"
+    assert resolve_data_path(payload, "prompts_path", DEFAULT_PROMPTS_PATH) == tmp / "prompts.csv"
+    assert resolve_data_path(payload, "speaker_selection_path", DEFAULT_SPEAKER_SELECTION_PATH) == tmp / "speaker_selection.csv"
+    assert resolve_data_path(payload, "speaker_embeddings_index", DEFAULT_EMBEDDINGS_INDEX_PATH) == tmp / "speaker_embeddings.csv"
+    assert resolve_deliverable_path(payload, "run_matrix", DEFAULT_RUN_MATRIX_PATH) == tmp / "run_matrix.csv"
+    assert resolve_deliverable_path(payload, "samples", DEFAULT_SAMPLES_PATH) == tmp / "samples.csv"
+    assert resolve_deliverable_path(payload, "report_assets_dir", DEFAULT_REPORT_ASSETS_DIR) == tmp / "report_assets"
+    assert resolve_samples_path(payload) == tmp / "samples.csv"
+    assert resolve_sample_rate(payload) == 22050
+
+
+def test_build_manifest_arg_parser_defaults_to_optional_paths() -> None:
+    parser = build_manifest_arg_parser()
+    args = parser.parse_args(["--check-files"])
+
+    assert args.manifest is None
+    assert args.prompts is None
+    assert args.config is None
+    assert args.check_files is True
+
+
+def test_build_speaker_embeddings_arg_parser_defaults_to_optional_paths() -> None:
+    parser = build_speaker_embeddings_arg_parser()
+    args = parser.parse_args(["-c", "config.yaml"])
+
+    assert args.config == "config.yaml"
+    assert args.speaker_selection is None
+    assert args.out_index is None
+    assert args.out_dir is None
+
+
+def test_build_run_matrix_arg_parser_defaults_to_optional_paths() -> None:
+    parser = build_run_matrix_arg_parser()
+    args = parser.parse_args(["-c", "config.yaml"])
+
+    assert args.config == "config.yaml"
+    assert args.out is None
+
+
+def test_build_samples_arg_parser_defaults_to_optional_paths() -> None:
+    parser = build_samples_arg_parser()
+    args = parser.parse_args(["-c", "config.yaml"])
+
+    assert args.config == "config.yaml"
+    assert args.run_matrix is None
+    assert args.out is None
+    assert args.audio_base_dir == str(DEFAULT_AUDIO_BASE_DIR)
 
 
 def test_run_matrix_generation() -> None:
@@ -425,6 +564,17 @@ def test_build_lora_arg_parser_accepts_gpu_hourly_rate_override() -> None:
     )
 
     assert args.gpu_hourly_rate == 1.75
+
+
+def test_build_lora_arg_parser_accepts_short_aliases() -> None:
+    parser = build_lora_arg_parser()
+    args = parser.parse_args(["-c", "config.yaml", "-s", "samples.csv", "-m", "manifest.csv", "-k", "ckpts", "-C", "cond_a"])
+
+    assert args.config == "config.yaml"
+    assert args.samples == "samples.csv"
+    assert args.manifest == "manifest.csv"
+    assert args.checkpoint_dir == "ckpts"
+    assert args.condition == ["cond_a"]
 
 
 def test_resolve_gpu_hourly_rate_uses_condition_value_without_cli_override() -> None:
@@ -1827,6 +1977,53 @@ def test_wer_computation() -> None:
         computed = compute_wer_from_asr(samples_path, tmp / "samples_with_wer.csv")
         assert float(computed.loc[0, "wer"]) == 0
         assert computed.loc[0, "status"] == "pending"
+
+
+def test_build_whisper_arg_parser_defaults_to_optional_paths() -> None:
+    parser = build_whisper_arg_parser()
+    args = parser.parse_args(["--all"])
+
+    assert args.config is None
+    assert args.samples is None
+    assert args.out is None
+    assert args.model_name is None
+    assert args.all is True
+
+
+def test_whisper_main_defaults_out_to_samples() -> None:
+    with patch("tcc_audio.whisper_batch.run_whisper_batch") as mocked:
+        whisper_main(["-s", "samples.csv"])
+
+    mocked.assert_called_once_with("samples.csv", "samples.csv", "openai/whisper-small", only_missing=True)
+
+
+def test_build_wer_arg_parser_defaults_to_optional_paths() -> None:
+    parser = build_wer_arg_parser()
+    args = parser.parse_args([])
+
+    assert args.config is None
+    assert args.samples is None
+    assert args.out is None
+    assert args.asr_column == "asr_text"
+
+
+def test_wer_main_defaults_out_to_samples() -> None:
+    fake = pd.DataFrame([{"wer": "0.0"}])
+    with patch("tcc_audio.wer.compute_wer_from_asr", return_value=fake) as mocked:
+        wer_main(["-s", "samples.csv"])
+
+    mocked.assert_called_once_with("samples.csv", "samples.csv", "asr_text")
+
+
+def test_build_report_assets_arg_parser_defaults_to_optional_paths() -> None:
+    parser = build_report_assets_arg_parser()
+    args = parser.parse_args(["-c", "config.yaml"])
+
+    assert args.config == "config.yaml"
+    assert args.samples is None
+    assert args.metrics is None
+    assert args.costs is None
+    assert args.out_dir is None
 
 
 def test_prepare_common_voice_metadata() -> None:

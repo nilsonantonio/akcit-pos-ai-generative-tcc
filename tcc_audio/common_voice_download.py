@@ -323,7 +323,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Download and stage Common Voice PT raw assets.")
     parser.add_argument("--dataset-id", default=DEFAULT_DATASET_ID)
     parser.add_argument("--dataset-slug", default=DEFAULT_DATASET_SLUG)
-    parser.add_argument("--out-dir", default="data/raw/common_voice_pt")
+    parser.add_argument("-o", "--out-dir", default="data/raw/common_voice_pt")
     parser.add_argument("--api-key-env", default=DEFAULT_API_KEY_ENV)
     parser.add_argument("--force-download", action="store_true")
     parser.add_argument("--force-extract", action="store_true")

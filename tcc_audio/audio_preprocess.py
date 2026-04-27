@@ -9,6 +9,13 @@ from pathlib import Path
 
 import pandas as pd
 
+from tcc_audio.cli_defaults import (
+    DEFAULT_PROCESSED_DIR,
+    DEFAULT_PROCESSED_METADATA_PATH,
+    DEFAULT_RAW_METADATA_PATH,
+    load_cli_config,
+    resolve_sample_rate,
+)
 from tcc_audio.io import ensure_parent_dir, read_csv
 
 
@@ -71,10 +78,11 @@ def preprocess_audio_dataset(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Convert Common Voice clips to WAV mono and compute duration.")
-    parser.add_argument("--metadata", required=True, help="Input metadata CSV.")
-    parser.add_argument("--out-dir", required=True, help="Output directory for processed WAV files.")
-    parser.add_argument("--out-metadata", required=True, help="Output metadata CSV.")
-    parser.add_argument("--sample-rate", type=int, default=16000)
+    parser.add_argument("-c", "--config", help="Optional experiment config used to resolve sample_rate.")
+    parser.add_argument("-m", "--metadata", default=str(DEFAULT_RAW_METADATA_PATH), help="Input metadata CSV.")
+    parser.add_argument("-o", "--out-dir", default=str(DEFAULT_PROCESSED_DIR), help="Output directory for processed WAV files.")
+    parser.add_argument("-u", "--out-metadata", default=str(DEFAULT_PROCESSED_METADATA_PATH), help="Output metadata CSV.")
+    parser.add_argument("--sample-rate", type=int)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--project-root", default=".")
     return parser
@@ -82,11 +90,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    _, config = load_cli_config(args.config)
+    sample_rate = args.sample_rate if args.sample_rate is not None else resolve_sample_rate(config)
     processed = preprocess_audio_dataset(
         metadata_path=args.metadata,
         out_dir=args.out_dir,
         out_metadata=args.out_metadata,
-        sample_rate=args.sample_rate,
+        sample_rate=sample_rate,
         overwrite=args.overwrite,
         project_root=args.project_root,
     )
@@ -96,4 +106,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -7,6 +7,11 @@ from pathlib import Path
 
 import pandas as pd
 
+from tcc_audio.cli_defaults import (
+    DEFAULT_MANIFEST_PATH,
+    DEFAULT_PROCESSED_METADATA_PATH,
+    DEFAULT_SPEAKER_SELECTION_PATH,
+)
 from tcc_audio.io import ensure_parent_dir, read_csv
 from tcc_audio.speecht5_text import normalize_text_for_speecht5
 
@@ -132,10 +137,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Build a speaker manifest from processed Common Voice metadata using global duration ranking."
     )
-    parser.add_argument("--metadata", required=True, help="Path to the processed Common Voice metadata CSV.")
-    parser.add_argument("--manifest-out", required=True, help="Output data_manifest.csv path.")
-    parser.add_argument("--speaker-selection-out", required=True, help="Output speaker selection CSV path.")
+    parser.add_argument("-m", "--metadata", default=str(DEFAULT_PROCESSED_METADATA_PATH), help="Path to the processed Common Voice metadata CSV.")
+    parser.add_argument("-o", "--manifest-out", default=str(DEFAULT_MANIFEST_PATH), help="Output data_manifest.csv path.")
+    parser.add_argument("-s", "--speaker-selection-out", default=str(DEFAULT_SPEAKER_SELECTION_PATH), help="Output speaker selection CSV path.")
     parser.add_argument(
+        "-n",
         "--speaker-target-count",
         type=int,
         default=4,

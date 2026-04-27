@@ -8,6 +8,11 @@ from pathlib import Path
 
 import pandas as pd
 
+from tcc_audio.cli_defaults import (
+    DEFAULT_RAW_CLIPS_DIR,
+    DEFAULT_RAW_METADATA_PATH,
+    DEFAULT_RAW_TSV,
+)
 from tcc_audio.io import ensure_parent_dir
 
 
@@ -261,13 +266,13 @@ def prepare_common_voice_metadata(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Prepare Common Voice metadata for the TCC pipeline.")
-    parser.add_argument("--tsv", required=True, help="Path to Common Voice validated.tsv.")
+    parser.add_argument("-t", "--tsv", default=str(DEFAULT_RAW_TSV), help="Path to Common Voice validated.tsv.")
     parser.add_argument("--validated-sentences-tsv", help="Path to Common Voice validated_sentences.tsv.")
     parser.add_argument("--clip-durations-tsv", help="Path to Common Voice clip_durations.tsv.")
-    parser.add_argument("--clips-dir", required=True, help="Path to Common Voice clips directory.")
-    parser.add_argument("--out", required=True, help="Output CSV path.")
-    parser.add_argument("--locale", default="pt", help="Locale filter when the column exists.")
-    parser.add_argument("--variant", help="Variant filter, for example pt-BR.")
+    parser.add_argument("-d", "--clips-dir", default=str(DEFAULT_RAW_CLIPS_DIR), help="Path to Common Voice clips directory.")
+    parser.add_argument("-o", "--out", default=str(DEFAULT_RAW_METADATA_PATH), help="Output CSV path.")
+    parser.add_argument("-l", "--locale", default="pt", help="Locale filter when the column exists.")
+    parser.add_argument("-v", "--variant", default="pt-BR", help="Variant filter, for example pt-BR.")
     parser.add_argument("--max-rows", type=int)
     return parser
 

@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+from tcc_audio.cli_defaults import DEFAULT_EVALUATION_DIR, DEFAULT_SAMPLES_PATH, load_cli_config, resolve_evaluation_dir, resolve_samples_path
 from tcc_audio.io import ensure_parent_dir, read_csv
 from tcc_audio.runtime import load_samples
 from tcc_audio.schema import EVAL_SAMPLES_REQUIRED_COLUMNS, NUMERIC_METRIC_COLUMNS
@@ -240,14 +241,18 @@ def _aggregate_costs_by_speaker(samples: pd.DataFrame) -> pd.DataFrame:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Aggregate experiment sample metrics.")
-    parser.add_argument("--samples", required=True, help="Path to samples.csv.")
-    parser.add_argument("--out-dir", required=True, help="Output directory for summaries.")
+    parser.add_argument("-c", "--config", help="Optional experiment config used to resolve samples/evaluation paths.")
+    parser.add_argument("-s", "--samples", help="Path to samples.csv.")
+    parser.add_argument("-o", "--out-dir", help="Output directory for summaries.")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    metrics, costs = aggregate_metrics(args.samples, args.out_dir)
+    _, config = load_cli_config(args.config)
+    samples_path = args.samples or str(resolve_samples_path(config) if config else DEFAULT_SAMPLES_PATH)
+    out_dir = args.out_dir or str(resolve_evaluation_dir(config) if config else DEFAULT_EVALUATION_DIR)
+    metrics, costs = aggregate_metrics(samples_path, out_dir)
     print(f"Wrote {len(metrics)} metric summary rows and {len(costs)} cost summary rows")
     return 0
 
