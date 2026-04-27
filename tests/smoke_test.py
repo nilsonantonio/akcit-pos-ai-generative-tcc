@@ -52,8 +52,14 @@ from tcc_audio.cli_defaults import (
 )
 from tcc_audio.common_voice import build_arg_parser as build_common_voice_arg_parser
 from tcc_audio.config import (
+    DEFAULT_ASR_LANGUAGE,
+    DEFAULT_ASR_MODEL,
+    DEFAULT_ASR_TASK,
     DEFAULT_SPEAKER_SIMILARITY_MODEL,
     DEFAULT_TTS_SPEAKER_EMBEDDING_DIM,
+    resolve_asr_language,
+    resolve_asr_model,
+    resolve_asr_task,
     resolve_speaker_similarity_model,
     resolve_tts_speaker_embedding_dim,
     resolve_tts_speaker_embedding_model,
@@ -102,7 +108,12 @@ from tcc_audio.training_cleanup import (
     resolve_cleanup_paths,
 )
 from tcc_audio.speecht5_text import count_unk_tokens, has_unk_tokens, normalize_text_for_speecht5
-from tcc_audio.whisper_batch import build_arg_parser as build_whisper_arg_parser, main as whisper_main
+from tcc_audio.whisper_batch import (
+    _load_asr_pipeline,
+    build_arg_parser as build_whisper_arg_parser,
+    main as whisper_main,
+    run_whisper_batch,
+)
 from tcc_audio.wer import build_arg_parser as build_wer_arg_parser, compute_wer_from_asr, main as wer_main, word_error_rate
 
 
@@ -2342,6 +2353,8 @@ def test_build_whisper_arg_parser_defaults_to_optional_paths() -> None:
     assert args.samples is None
     assert args.out is None
     assert args.model_name is None
+    assert args.task is None
+    assert args.language is None
     assert args.all is True
 
 
@@ -2349,7 +2362,271 @@ def test_whisper_main_defaults_out_to_samples() -> None:
     with patch("tcc_audio.whisper_batch.run_whisper_batch") as mocked:
         whisper_main(["-s", "samples.csv"])
 
-    mocked.assert_called_once_with("samples.csv", "samples.csv", "openai/whisper-small", only_missing=True)
+    mocked.assert_called_once_with(
+        "samples.csv",
+        "samples.csv",
+        DEFAULT_ASR_MODEL,
+        only_missing=True,
+        task=DEFAULT_ASR_TASK,
+        language=DEFAULT_ASR_LANGUAGE,
+    )
+
+
+def test_load_asr_pipeline_prefers_cuda() -> None:
+    fake_torch = types.ModuleType("torch")
+    fake_torch.cuda = types.SimpleNamespace(is_available=lambda: True)
+    fake_torch.backends = types.SimpleNamespace(mps=types.SimpleNamespace(is_available=lambda: True))
+    fake_torch.device = lambda name: f"device:{name}"
+    fake_transformers = types.ModuleType("transformers")
+    fake_pipeline = object()
+    fake_transformers.pipeline = fake_pipeline
+
+    with patch.dict(sys.modules, {"torch": fake_torch, "transformers": fake_transformers}), patch(
+        "tcc_audio.whisper_batch.platform.system", return_value="Darwin"
+    ):
+        pipeline_factory, device = _load_asr_pipeline()
+
+    assert pipeline_factory is fake_pipeline
+    assert device == 0
+
+
+def test_load_asr_pipeline_uses_mps_on_macos_when_cuda_is_unavailable() -> None:
+    fake_torch = types.ModuleType("torch")
+    fake_torch.cuda = types.SimpleNamespace(is_available=lambda: False)
+    fake_torch.backends = types.SimpleNamespace(mps=types.SimpleNamespace(is_available=lambda: True))
+    fake_torch.device = lambda name: f"device:{name}"
+    fake_transformers = types.ModuleType("transformers")
+    fake_pipeline = object()
+    fake_transformers.pipeline = fake_pipeline
+
+    with patch.dict(sys.modules, {"torch": fake_torch, "transformers": fake_transformers}), patch(
+        "tcc_audio.whisper_batch.platform.system", return_value="Darwin"
+    ):
+        pipeline_factory, device = _load_asr_pipeline()
+
+    assert pipeline_factory is fake_pipeline
+    assert device == "device:mps"
+
+
+def test_load_asr_pipeline_falls_back_to_cpu_without_cuda_or_mps() -> None:
+    fake_torch = types.ModuleType("torch")
+    fake_torch.cuda = types.SimpleNamespace(is_available=lambda: False)
+    fake_torch.backends = types.SimpleNamespace(mps=types.SimpleNamespace(is_available=lambda: False))
+    fake_torch.device = lambda name: f"device:{name}"
+    fake_transformers = types.ModuleType("transformers")
+    fake_pipeline = object()
+    fake_transformers.pipeline = fake_pipeline
+
+    with patch.dict(sys.modules, {"torch": fake_torch, "transformers": fake_transformers}), patch(
+        "tcc_audio.whisper_batch.platform.system", return_value="Darwin"
+    ):
+        pipeline_factory, device = _load_asr_pipeline()
+
+    assert pipeline_factory is fake_pipeline
+    assert device == -1
+
+
+def test_resolve_asr_defaults() -> None:
+    assert resolve_asr_model({}) == DEFAULT_ASR_MODEL
+    assert resolve_asr_task({}) == DEFAULT_ASR_TASK
+    assert resolve_asr_language({}) == DEFAULT_ASR_LANGUAGE
+
+
+def test_resolve_asr_config_values() -> None:
+    config = {
+        "evaluation": {
+            "asr": {
+                "name": "openai/whisper-medium",
+                "task": "translate",
+                "language": "en",
+            }
+        }
+    }
+
+    assert resolve_asr_model(config) == "openai/whisper-medium"
+    assert resolve_asr_task(config) == "translate"
+    assert resolve_asr_language(config) == "en"
+
+
+def test_whisper_main_uses_yaml_asr_settings() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        config_path = tmp / "config.yaml"
+        config_path.write_text(
+            "evaluation:\n"
+            "  asr:\n"
+            "    name: openai/whisper-medium\n"
+            "    task: translate\n"
+            "    language: en\n",
+            encoding="utf-8",
+        )
+
+        with patch("tcc_audio.whisper_batch.run_whisper_batch") as mocked:
+            whisper_main(["-c", str(config_path), "-s", "samples.csv"])
+
+    mocked.assert_called_once_with(
+        "samples.csv",
+        "samples.csv",
+        "openai/whisper-medium",
+        only_missing=True,
+        task="translate",
+        language="en",
+    )
+
+
+def test_whisper_main_cli_overrides_yaml_asr_settings() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        config_path = tmp / "config.yaml"
+        config_path.write_text(
+            "evaluation:\n"
+            "  asr:\n"
+            "    name: openai/whisper-medium\n"
+            "    task: translate\n"
+            "    language: en\n",
+            encoding="utf-8",
+        )
+
+        with patch("tcc_audio.whisper_batch.run_whisper_batch") as mocked:
+            whisper_main(
+                [
+                    "-c",
+                    str(config_path),
+                    "-s",
+                    "samples.csv",
+                    "--task",
+                    "transcribe",
+                    "--language",
+                    "pt",
+                    "--model-name",
+                    "openai/whisper-small",
+                ]
+            )
+
+    mocked.assert_called_once_with(
+        "samples.csv",
+        "samples.csv",
+        "openai/whisper-small",
+        only_missing=True,
+        task="transcribe",
+        language="pt",
+    )
+
+
+def test_run_whisper_batch_passes_explicit_generation_settings() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        audio_path = tmp / "sample.wav"
+        audio_path.write_bytes(b"fake-audio")
+        samples = pd.DataFrame(
+            [
+                {
+                    "sample_id": "sample-1",
+                    "audio_path": str(audio_path),
+                    "asr_text": "",
+                    "failure_reason": "",
+                    "status": "pending",
+                }
+            ]
+        )
+        transcriber_calls: list[dict[str, object]] = []
+
+        class DummyGenerationConfig:
+            def __init__(self) -> None:
+                self.suppress_tokens = [1, 2, 3]
+                self.begin_suppress_tokens = [4, 5]
+
+        class DummyTranscriber:
+            def __init__(self) -> None:
+                self.generation_config = DummyGenerationConfig()
+                self.model = type("DummyModel", (), {"generation_config": self.generation_config})()
+
+            def __call__(self, audio: str, **kwargs):
+                transcriber_calls.append({"audio": audio, **kwargs})
+                assert self.generation_config.suppress_tokens is None
+                assert self.generation_config.begin_suppress_tokens is None
+                return {"text": "texto transcrito"}
+
+        saved: dict[str, object] = {}
+
+        with (
+            patch("tcc_audio.whisper_batch._load_asr_pipeline", return_value=(lambda *args, **kwargs: DummyTranscriber(), -1)),
+            patch("tcc_audio.whisper_batch.load_samples", return_value=samples.copy()),
+            patch("tcc_audio.whisper_batch.refresh_sample_status", side_effect=lambda frame: frame),
+            patch("tcc_audio.whisper_batch.save_samples", side_effect=lambda frame, path: saved.update({"frame": frame.copy(), "path": path})),
+        ):
+            run_whisper_batch(
+                "samples.csv",
+                "out.csv",
+                "openai/whisper-small",
+                only_missing=True,
+                task="transcribe",
+                language="pt",
+            )
+
+    assert len(transcriber_calls) == 1
+    assert transcriber_calls[0]["audio"] == str(audio_path)
+    assert "generation_config" not in transcriber_calls[0]
+    assert transcriber_calls[0]["generate_kwargs"] == {
+        "task": "transcribe",
+        "language": "pt",
+        "suppress_tokens": [1, 2, 3],
+        "begin_suppress_tokens": [4, 5],
+    }
+    saved_frame = saved["frame"]
+    assert saved["path"] == "out.csv"
+    assert saved_frame.loc[0, "asr_text"] == "texto transcrito"
+
+
+def test_run_whisper_batch_restores_suppression_defaults_after_call() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        audio_path = tmp / "sample.wav"
+        audio_path.write_bytes(b"fake-audio")
+        samples = pd.DataFrame(
+            [
+                {
+                    "sample_id": "sample-1",
+                    "audio_path": str(audio_path),
+                    "asr_text": "",
+                    "failure_reason": "",
+                    "status": "pending",
+                }
+            ]
+        )
+
+        class DummyGenerationConfig:
+            def __init__(self) -> None:
+                self.suppress_tokens = [7, 8]
+                self.begin_suppress_tokens = [9]
+
+        class DummyTranscriber:
+            def __init__(self) -> None:
+                self.generation_config = DummyGenerationConfig()
+                self.model = type("DummyModel", (), {"generation_config": self.generation_config})()
+
+            def __call__(self, audio: str, **kwargs):
+                return {"text": "texto transcrito"}
+
+        transcriber = DummyTranscriber()
+
+        with (
+            patch("tcc_audio.whisper_batch._load_asr_pipeline", return_value=(lambda *args, **kwargs: transcriber, -1)),
+            patch("tcc_audio.whisper_batch.load_samples", return_value=samples.copy()),
+            patch("tcc_audio.whisper_batch.refresh_sample_status", side_effect=lambda frame: frame),
+            patch("tcc_audio.whisper_batch.save_samples"),
+        ):
+            run_whisper_batch(
+                "samples.csv",
+                "out.csv",
+                "openai/whisper-small",
+                only_missing=True,
+                task="transcribe",
+                language="pt",
+            )
+
+    assert transcriber.generation_config.suppress_tokens == [7, 8]
+    assert transcriber.generation_config.begin_suppress_tokens == [9]
 
 
 def test_build_wer_arg_parser_defaults_to_optional_paths() -> None:

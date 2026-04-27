@@ -113,6 +113,8 @@ evaluation:
   speaker_similarity_model: speechbrain/spkrec-ecapa-voxceleb
   asr:
     name: openai/whisper-small
+    task: transcribe
+    language: pt
     finetuned: false
   automatic_metrics:
     - wer
