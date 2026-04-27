@@ -141,7 +141,7 @@ Consumido por:
 Arquivos típicos:
 
 - `common_voice_metadata.csv`
-- `common_voice_curated.csv`
+- `common_voice_processed.csv`
 - `data_manifest.csv`
 - `speaker_selection.csv`
 
@@ -278,9 +278,9 @@ Consumido por:
 
 Primeiro CSV operacional do pipeline. Representa o subset `pt-BR` extraído do `Common Voice`, ainda próximo da origem, mas já filtrado por locale/variant e alinhado ao projeto.
 
-### `common_voice_curated.csv`
+### `common_voice_processed.csv`
 
-Versão curada após preprocessamento do áudio. Serve de base para a seleção de speakers.
+Versão processada após preprocessamento do áudio. Serve de base para a seleção de speakers.
 
 ### `data_manifest.csv`
 

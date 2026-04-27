@@ -83,14 +83,14 @@ Preprocesse os audios para o formato canonico usado no experimento.
 python3 scripts/preprocess_audio_dataset.py \
   --metadata data/manifests/common_voice_metadata.csv \
   --out-dir data/processed/common_voice_pt \
-  --out-metadata data/manifests/common_voice_curated.csv
+  --out-metadata data/manifests/common_voice_processed.csv
 ```
 
 Selecione os speakers alvo e materialize o manifesto principal do experimento.
 
 ```bash
 python3 scripts/select_speakers.py \
-  --metadata data/manifests/common_voice_curated.csv \
+  --metadata data/manifests/common_voice_processed.csv \
   --speaker-target-count 1000 \
   --manifest-out data/manifests/data_manifest.csv \
   --speaker-selection-out data/manifests/speaker_selection.csv

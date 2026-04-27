@@ -96,7 +96,7 @@ def select_speakers(
                 "reference_duration_s": float(reference_row["duration_s"]),
                 "license": reference_row["license"],
                 "source": reference_row["source"],
-                "notes": "Auto-selected from curated metadata; manually audit audio before training.",
+                "notes": "Auto-selected from processed metadata; manually audit audio before training.",
             }
         )
 
@@ -130,9 +130,9 @@ def select_speakers(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Build a speaker manifest from curated Common Voice metadata using global duration ranking."
+        description="Build a speaker manifest from processed Common Voice metadata using global duration ranking."
     )
-    parser.add_argument("--metadata", required=True, help="Path to the curated Common Voice metadata CSV.")
+    parser.add_argument("--metadata", required=True, help="Path to the processed Common Voice metadata CSV.")
     parser.add_argument("--manifest-out", required=True, help="Output data_manifest.csv path.")
     parser.add_argument("--speaker-selection-out", required=True, help="Output speaker selection CSV path.")
     parser.add_argument(

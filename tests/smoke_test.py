@@ -851,6 +851,7 @@ def test_build_dataset_inventory_arg_parser_and_resolve_defaults() -> None:
     assert args.sample_size == 10
     assert paths.raw_dir == Path("data/raw/common_voice_pt")
     assert paths.processed_dir == Path("data/processed/common_voice_pt")
+    assert paths.processed_metadata_path == Path("data/manifests/common_voice_processed.csv")
     assert paths.manifest_path == tmp / "data/manifests/data_manifest.csv"
     assert paths.speaker_selection_path == tmp / "data/manifests/speaker_selection.csv"
 
@@ -871,7 +872,7 @@ def test_build_dataset_inventory_reports_raw_processed_and_selected_speakers(mon
             encoding="utf-8",
         )
 
-        processed_metadata = tmp / "data/manifests/common_voice_curated.csv"
+        processed_metadata = tmp / "data/manifests/common_voice_processed.csv"
         processed_metadata.parent.mkdir(parents=True, exist_ok=True)
         wav_a = tmp / "data/processed/common_voice_pt/source_1/a.wav"
         wav_b = tmp / "data/processed/common_voice_pt/source_1/b.wav"
@@ -973,7 +974,7 @@ def test_build_dataset_inventory_reports_single_clip_speaker_as_train_only(monke
             encoding="utf-8",
         )
 
-        processed_metadata = tmp / "data/manifests/common_voice_curated.csv"
+        processed_metadata = tmp / "data/manifests/common_voice_processed.csv"
         processed_metadata.parent.mkdir(parents=True, exist_ok=True)
         wav_a = tmp / "data/processed/common_voice_pt/source_1/a.wav"
         _write_wav(wav_a)
@@ -1027,7 +1028,7 @@ def test_build_dataset_inventory_degrades_when_ffprobe_is_unavailable(monkeypatc
             encoding="utf-8",
         )
 
-        processed_metadata = tmp / "data/manifests/common_voice_curated.csv"
+        processed_metadata = tmp / "data/manifests/common_voice_processed.csv"
         processed_metadata.parent.mkdir(parents=True, exist_ok=True)
         wav_a = tmp / "data/processed/common_voice_pt/source_1/a.wav"
         _write_wav(wav_a)
@@ -1065,7 +1066,7 @@ def test_build_dataset_inventory_degrades_when_ffprobe_is_unavailable(monkeypatc
     assert "WARNINGS" in report
 
 
-def test_speaker_selection_from_curated_metadata() -> None:
+def test_speaker_selection_from_processed_metadata() -> None:
     with TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         rows = []
@@ -2191,7 +2192,7 @@ def test_report_assets_without_human_eval() -> None:
 BOOTSTRAP_SMOKE_TESTS = (
     test_prompt_file_has_expected_contract,
     test_run_matrix_generation,
-    test_speaker_selection_from_curated_metadata,
+    test_speaker_selection_from_processed_metadata,
     test_speecht5_text_normalization_and_unk_audit,
     test_validate_manifest_with_config_audits_speecht5_unknown_tokens,
     test_speaker_embedding_config_resolution,
