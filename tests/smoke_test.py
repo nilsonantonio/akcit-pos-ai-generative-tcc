@@ -2005,10 +2005,13 @@ def test_speecht5_text_normalization_and_unk_audit() -> None:
             return {"input_ids": [99 if ord(character) > 127 else 1 for character in text]}
 
     normalized = normalize_text_for_speecht5('“Ação à noite, café e pinguim ü”')
+    guillemet_normalized = normalize_text_for_speecht5("«ação»")
 
     assert normalized == '"Acao a noite, cafe e pinguim u"'
+    assert guillemet_normalized == '"acao"'
     assert count_unk_tokens('“Ação à noite, café e pinguim ü”', FakeTokenizer()) > 0
     assert not has_unk_tokens(normalized, FakeTokenizer())
+    assert not has_unk_tokens(guillemet_normalized, FakeTokenizer())
 
 
 def test_validate_manifest_with_config_audits_speecht5_unknown_tokens() -> None:
@@ -2038,6 +2041,45 @@ def test_validate_manifest_with_config_audits_speecht5_unknown_tokens() -> None:
                         "reference_audio": "reference.wav",
                         "target_text": "Ação rápida em português brasileiro.",
                         "target_text_speecht5": "Acao rapida em portugues brasileiro.",
+                        "text_variant": "normalized",
+                    }
+                ]
+            ).to_csv(manifest_path, index=False)
+
+            report = validate_data_manifest(manifest_path, config_path=config_path)
+
+            assert report.ok, report.errors
+            assert report.summary["speecht5_rows_with_unk_raw"] == 1
+            assert report.summary["speecht5_rows_with_unk_normalized"] == 0
+
+
+def test_validate_manifest_re_normalizes_stale_speecht5_audit_text() -> None:
+    class FakeTokenizer:
+        unk_token_id = 99
+
+        def __call__(self, text: str, return_attention_mask: bool = False) -> dict[str, list[int]]:
+            del return_attention_mask
+            return {"input_ids": [99 if ord(character) > 127 else 1 for character in text]}
+
+    with patch("tcc_audio.manifest._load_speecht5_tokenizer", return_value=FakeTokenizer()):
+        with TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            manifest_path = tmp / "data_manifest.csv"
+            config_path = tmp / "config.yaml"
+            config_path.write_text("project:\n  primary_model: microsoft/speecht5_tts\n", encoding="utf-8")
+            pd.DataFrame(
+                [
+                    {
+                        "speaker_id": "speaker_01",
+                        "utterance_id": "utt_001",
+                        "split": "train",
+                        "duration_s": "3.2",
+                        "source": "common_voice_pt",
+                        "license": "CC0-1.0",
+                        "audio_path": "audio.wav",
+                        "reference_audio": "reference.wav",
+                        "target_text": "e o estádio marcado por Sanches, quando disse «nem sei se nada sei».",
+                        "target_text_speecht5": 'e o estadio marcado por Sanches, quando disse «nem sei se nada sei».',
                         "text_variant": "normalized",
                     }
                 ]

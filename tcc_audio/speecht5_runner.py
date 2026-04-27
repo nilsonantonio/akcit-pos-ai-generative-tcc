@@ -374,7 +374,7 @@ def _build_dataset(manifest: pd.DataFrame, speaker_embedding_map: dict[str, str]
     def _resolve_training_text(row: pd.Series) -> str:
         normalized_text = str(row.get("target_text_speecht5", "")).strip()
         if normalized_text:
-            return normalized_text
+            return normalize_text_for_speecht5(normalized_text)
         return normalize_text_for_speecht5(row["target_text"])
 
     class SpeechT5TTSDataset(Dataset):

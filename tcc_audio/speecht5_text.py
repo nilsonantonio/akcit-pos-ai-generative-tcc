@@ -13,6 +13,8 @@ _TYPOGRAPHIC_TRANSLATION = str.maketrans(
         "\u2019": "'",
         "\u201c": '"',
         "\u201d": '"',
+        "\u00ab": '"',
+        "\u00bb": '"',
     }
 )
 

@@ -182,10 +182,10 @@ def validate_data_manifest(
         for row_number, row in manifest.iterrows():
             line = row_number + 2
             raw_text = row["target_text"]
-            normalized_text = (
-                str(row.get("target_text_speecht5", "")).strip() if has_audit_column else ""
-            )
-            if not normalized_text:
+            normalized_text = str(row.get("target_text_speecht5", "")).strip() if has_audit_column else ""
+            if normalized_text:
+                normalized_text = normalize_text_for_speecht5(normalized_text)
+            else:
                 normalized_text = normalize_text_for_speecht5(raw_text)
                 normalized_fallback_rows += 1
 
