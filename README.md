@@ -285,7 +285,6 @@ python3 demo/app.py --samples artifacts/evaluation/samples.csv
 - `requirements-macos-mps.txt`: dependencia para `macOS Apple Silicon` com `PyTorch MPS`.
 - `requirements-linux-gpu.txt`: dependencia para `Linux/RunPod` com `CUDA`.
 - `docker/docker-compose.nvidia.yml`: compose oficial para `Linux NVIDIA` e `RunPod`.
-- `docker/Dockerfile.cpu`: legado para analise/preprocess, nao e caminho oficial de GPU.
 
 Regra operacional:
 

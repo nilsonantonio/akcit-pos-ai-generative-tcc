@@ -142,7 +142,7 @@ python3 scripts/preprocess_audio_dataset.py \
 ```bash
 python3 scripts/select_speakers.py \
   --metadata data/manifests/common_voice_curated.csv \
-  --speaker-target-count 4 \
+  --speaker-target-count 1000 \
   --manifest-out data/manifests/data_manifest.csv \
   --speaker-selection-out data/manifests/speaker_selection.csv
 ```
