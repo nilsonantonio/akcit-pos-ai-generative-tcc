@@ -148,6 +148,14 @@ python3 scripts/select_speakers.py \
 ```
 
 ```bash
+python3 scripts/log_dataset_inventory.py \
+  --config configs/speecht5_minimal.yaml \
+  --json-out artifacts/dataset_inventory.json
+```
+
+O comando gera um relatorio no console e grava um JSON com o inventario hierarquico de `data/raw`, `data/processed` e `selected_speakers`.
+
+```bash
 python3 scripts/validate_manifest.py \
   --manifest data/manifests/data_manifest.csv \
   --config configs/speecht5_minimal.yaml \
@@ -210,6 +218,39 @@ python3 scripts/backfill_training_costs.py \
   --summary-out artifacts/evaluation/manual_training_costs_summary.csv
 ```
 
+Para limpar apenas os rastros materializados de treino de uma ou mais condicionais LoRA, use `clear_speecht5_training_results.py`. O script pede confirmacao por padrao, aceita `--bypass` e usa defaults do projeto para todos os caminhos quando chamado diretamente:
+
+```bash
+python3 scripts/clear_speecht5_training_results.py \
+  --condition speecht5_lora_unique
+```
+
+Para limpar varias condicionais especificas:
+
+```bash
+python3 scripts/clear_speecht5_training_results.py \
+  --condition speecht5_lora_conservative \
+  --condition speecht5_lora_unique
+```
+
+Para limpar todos os treinos LoRA materializados:
+
+```bash
+python3 scripts/clear_speecht5_training_results.py \
+  --condition all
+```
+
+Esse cleanup remove checkpoints, audios materializados, linhas materializadas no `samples.csv`, agregados globais em `artifacts/evaluation/` e o diretorio `report_assets/`.
+
+Se a intencao for remover a condicional inteira do experimento, incluindo linhas base do `samples.csv` e a entrada correspondente no YAML, use `remove_speecht5_condition.py`:
+
+```bash
+python3 scripts/remove_speecht5_condition.py \
+  --condition speecht5_lora_unique
+```
+
+Esse fluxo encadeia o cleanup com `bypass` interno, remove as linhas base da condicional no `samples.csv`, remove a condicional do bloco `conditions:` do config e invalida `deliverables.run_matrix` quando o arquivo existir.
+
 Depois do piloto, rode as fases restantes:
 
 ```bash
@@ -271,6 +312,7 @@ python3 scripts/download_common_voice_pt.py --out-dir /workspace/data/raw/common
 python3 scripts/prepare_common_voice_metadata.py --tsv /workspace/data/raw/common_voice_pt/validated.tsv --clips-dir /workspace/data/raw/common_voice_pt/clips --locale pt --variant pt-BR --out data/manifests/common_voice_metadata.csv
 python3 scripts/preprocess_audio_dataset.py --metadata data/manifests/common_voice_metadata.csv --out-dir data/processed/common_voice_pt --out-metadata data/manifests/common_voice_curated.csv
 python3 scripts/select_speakers.py --metadata data/manifests/common_voice_curated.csv --manifest-out data/manifests/data_manifest.csv --speaker-selection-out data/manifests/speaker_selection.csv
+python3 scripts/log_dataset_inventory.py --config configs/speecht5_minimal.yaml --json-out artifacts/dataset_inventory.json
 python3 scripts/validate_manifest.py --manifest data/manifests/data_manifest.csv --config configs/speecht5_minimal.yaml --prompts data/prompts/ptbr_test_prompts.csv --check-files
 python3 scripts/extract_speaker_embeddings.py --config configs/speecht5_minimal.yaml --speaker-selection data/manifests/speaker_selection.csv --out-index artifacts/embeddings/speaker_embeddings.csv --out-dir artifacts/embeddings
 python3 scripts/generate_run_matrix.py --config configs/speecht5_minimal.yaml --out artifacts/run_matrix.csv

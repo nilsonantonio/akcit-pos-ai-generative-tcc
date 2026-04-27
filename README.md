@@ -69,7 +69,17 @@ python3 scripts/select_speakers.py \
 
 `minutes_per_speaker` continua definindo o teto de audio amostrado por speaker, mas speakers com menos minutos continuam elegiveis.
 
-6. Valide o manifesto:
+6. Gere um inventario do dataset para inspecionar `data/raw`, `data/processed` e o resumo dos speakers selecionados:
+
+```bash
+python3 scripts/log_dataset_inventory.py \
+  --config configs/speecht5_minimal.yaml \
+  --json-out artifacts/dataset_inventory.json
+```
+
+O comando imprime um relatorio no console e salva um JSON com os blocos `raw`, `processed`, `selected_speakers`, `sampling` e `paths`.
+
+7. Valide o manifesto:
 
 ```bash
 python3 scripts/validate_manifest.py \
@@ -77,7 +87,7 @@ python3 scripts/validate_manifest.py \
   --prompts data/prompts/ptbr_test_prompts.csv
 ```
 
-7. Gere embeddings de speaker:
+8. Gere embeddings de speaker:
 
 ```bash
 python3 scripts/extract_speaker_embeddings.py \
@@ -89,7 +99,7 @@ python3 scripts/extract_speaker_embeddings.py \
 
 Esse passo prepara os embeddings consumidos pela sintese do SpeechT5. O `speaker_embedding_path` do `samples.csv` aponta para esses embeddings de sintese.
 
-8. Gere a matriz de execucao:
+9. Gere a matriz de execucao:
 
 ```bash
 python3 scripts/generate_run_matrix.py \
@@ -97,7 +107,7 @@ python3 scripts/generate_run_matrix.py \
   --out artifacts/run_matrix.csv
 ```
 
-9. Inicialize o ledger de amostras:
+10. Inicialize o ledger de amostras:
 
 ```bash
 python3 scripts/init_samples.py \
@@ -107,7 +117,7 @@ python3 scripts/init_samples.py \
   --out artifacts/evaluation/samples.csv
 ```
 
-10. Rode o pipeline LoRA:
+11. Rode o pipeline LoRA:
 
 ```bash
 python3 scripts/run_speecht5_lora.py \
@@ -141,6 +151,45 @@ python3 scripts/backfill_training_costs.py \
   --gpu-hourly-rate 0.0 \
   --summary-out artifacts/evaluation/manual_training_costs_summary.csv
 ```
+
+Para limpar apenas os rastros materializados de treino de uma ou mais condicionais LoRA, use `clear_speecht5_training_results.py`. O script pede confirmacao por padrao, aceita `--bypass` para automacao e, quando chamado diretamente, so exige `--condition` porque os demais caminhos usam defaults do projeto:
+
+```bash
+python3 scripts/clear_speecht5_training_results.py \
+  --condition speecht5_lora_unique
+```
+
+Para limpar varias condicionais especificas:
+
+```bash
+python3 scripts/clear_speecht5_training_results.py \
+  --condition speecht5_lora_conservative \
+  --condition speecht5_lora_unique
+```
+
+Para remover todos os treinos LoRA materializados:
+
+```bash
+python3 scripts/clear_speecht5_training_results.py \
+  --condition all
+```
+
+Esse cleanup remove:
+
+- checkpoints em `artifacts/checkpoints/lora/<condition>/`
+- audios materializados em `artifacts/audio/<condition>/`
+- linhas materializadas da condicional no `samples.csv`
+- agregados globais em `artifacts/evaluation/`
+- o diretorio `report_assets/`
+
+Se a intencao for remover a condicional inteira do experimento, incluindo linhas base do `samples.csv` e a entrada correspondente no YAML, use `remove_speecht5_condition.py`. Esse script tambem pede confirmacao por padrao e aceita `--bypass`:
+
+```bash
+python3 scripts/remove_speecht5_condition.py \
+  --condition speecht5_lora_unique
+```
+
+Esse fluxo executa o cleanup acima, remove as linhas base da condicional no `samples.csv`, remove a condicional do bloco `conditions:` do config e invalida `deliverables.run_matrix` quando o arquivo existir.
 
 11. Rode Whisper e calcule WER para as amostras materializadas por checkpoint:
 
