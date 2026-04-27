@@ -61,6 +61,7 @@ from tcc_audio.config import (
 from tcc_audio.dataset_inventory import (
     build_arg_parser as build_dataset_inventory_arg_parser,
     build_dataset_inventory,
+    main as dataset_inventory_main,
     render_dataset_inventory,
     resolve_inventory_paths,
 )
@@ -241,6 +242,60 @@ def _write_wav(path: Path, *, sample_rate: int = 16000, channels: int = 1, frame
         handle.setsampwidth(2)
         handle.setframerate(sample_rate)
         handle.writeframes(b"\x00\x00" * frames * channels)
+
+
+def _prepare_dataset_inventory_fixture(tmp: Path) -> dict[str, Path]:
+    config = _write_inventory_config(tmp)
+    raw_dir = tmp / "data/raw/common_voice_pt"
+    clips_dir = raw_dir / "clips"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    for name in ["clip_a.mp3", "clip_b.mp3", "clip_c.mp3"]:
+        (clips_dir / name).write_bytes(b"fake")
+    (raw_dir / "validated.tsv").write_text(
+        "client_id\tpath\ttext\tgender\tlocale\tvariant\n"
+        "spk1\tclip_a.mp3\tTexto A\tmale\tpt\tpt-BR\n"
+        "spk2\tclip_b.mp3\tTexto B\tfemale\tpt\tpt-PT\n",
+        encoding="utf-8",
+    )
+
+    processed_dir = tmp / "data/processed/common_voice_pt"
+    processed_metadata = tmp / "data/manifests/common_voice_processed.csv"
+    processed_metadata.parent.mkdir(parents=True, exist_ok=True)
+    wav_a = processed_dir / "source_1/a.wav"
+    wav_b = processed_dir / "source_1/b.wav"
+    wav_c = processed_dir / "source_2/c.wav"
+    for wav_path in [wav_a, wav_b, wav_c]:
+        _write_wav(wav_path)
+    pd.DataFrame(
+        [
+            {"source_speaker_id": "source_1", "duration_s": 1.5, "audio_path": str(wav_a)},
+            {"source_speaker_id": "source_1", "duration_s": 2.5, "audio_path": str(wav_b)},
+            {"source_speaker_id": "source_2", "duration_s": 5.0, "audio_path": str(wav_c)},
+        ]
+    ).to_csv(processed_metadata, index=False)
+
+    manifest_path = tmp / "data/manifests/data_manifest.csv"
+    pd.DataFrame(
+        [
+            {"speaker_id": "speaker_01", "split": "train", "duration_s": 1.5, "audio_path": str(wav_a)},
+            {"speaker_id": "speaker_01", "split": "val", "duration_s": 2.5, "audio_path": str(wav_b)},
+            {"speaker_id": "speaker_02", "split": "train", "duration_s": 5.0, "audio_path": str(wav_c)},
+        ]
+    ).to_csv(manifest_path, index=False)
+
+    speaker_selection = tmp / "data/manifests/speaker_selection.csv"
+    pd.DataFrame([{"speaker_id": "speaker_01"}, {"speaker_id": "speaker_02"}]).to_csv(speaker_selection, index=False)
+    json_out = tmp / "artifacts/dataset_inventory.json"
+
+    return {
+        "config": config,
+        "raw_dir": raw_dir,
+        "processed_dir": processed_dir,
+        "processed_metadata": processed_metadata,
+        "manifest_path": manifest_path,
+        "speaker_selection": speaker_selection,
+        "json_out": json_out,
+    }
 
 
 def test_prompt_file_has_expected_contract() -> None:
@@ -999,6 +1054,7 @@ def test_build_dataset_inventory_arg_parser_and_resolve_defaults() -> None:
     assert args.config == str(config)
     assert args.json_out == str(tmp / "inventory.json")
     assert args.sample_size == 10
+    assert args.override is False
     assert paths.raw_dir == Path("data/raw/common_voice_pt")
     assert paths.processed_dir == Path("data/processed/common_voice_pt")
     assert paths.processed_metadata_path == Path("data/manifests/common_voice_processed.csv")
@@ -1006,48 +1062,117 @@ def test_build_dataset_inventory_arg_parser_and_resolve_defaults() -> None:
     assert paths.speaker_selection_path == tmp / "data/manifests/speaker_selection.csv"
 
 
-def test_build_dataset_inventory_reports_raw_processed_and_selected_speakers(monkeypatch) -> None:
+def test_build_dataset_inventory_arg_parser_accepts_override() -> None:
+    parser = build_dataset_inventory_arg_parser()
+    args = parser.parse_args(["--override"])
+
+    assert args.override is True
+
+
+def test_build_dataset_inventory_uses_cached_json_when_available(monkeypatch) -> None:
     with TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
-        config = _write_inventory_config(tmp)
-        raw_dir = tmp / "data/raw/common_voice_pt"
-        clips_dir = raw_dir / "clips"
-        clips_dir.mkdir(parents=True, exist_ok=True)
-        for name in ["clip_a.mp3", "clip_b.mp3", "clip_c.mp3"]:
-            (clips_dir / name).write_bytes(b"fake")
-        (raw_dir / "validated.tsv").write_text(
-            "client_id\tpath\ttext\tgender\tlocale\tvariant\n"
-            "spk1\tclip_a.mp3\tTexto A\tmale\tpt\tpt-BR\n"
-            "spk2\tclip_b.mp3\tTexto B\tfemale\tpt\tpt-PT\n",
-            encoding="utf-8",
+        fixture = _prepare_dataset_inventory_fixture(tmp)
+        cached_inventory = {
+            "raw": {"overall_totals": {"total_clips": 99}},
+            "processed": {"speaker_count": 12},
+            "selected_speakers": {"unique": {"speaker_count": 3}},
+        }
+        fixture["json_out"].parent.mkdir(parents=True, exist_ok=True)
+        fixture["json_out"].write_text(json.dumps(cached_inventory) + "\n", encoding="utf-8")
+        original_text = fixture["json_out"].read_text(encoding="utf-8")
+
+        monkeypatch.setattr(
+            "tcc_audio.dataset_inventory._build_raw_inventory",
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("raw inventory should not rebuild when cache is valid")),
         )
 
-        processed_metadata = tmp / "data/manifests/common_voice_processed.csv"
-        processed_metadata.parent.mkdir(parents=True, exist_ok=True)
-        wav_a = tmp / "data/processed/common_voice_pt/source_1/a.wav"
-        wav_b = tmp / "data/processed/common_voice_pt/source_1/b.wav"
-        wav_c = tmp / "data/processed/common_voice_pt/source_2/c.wav"
-        for wav_path in [wav_a, wav_b, wav_c]:
-            _write_wav(wav_path)
-        pd.DataFrame(
-            [
-                {"source_speaker_id": "source_1", "duration_s": 1.5, "audio_path": str(wav_a)},
-                {"source_speaker_id": "source_1", "duration_s": 2.5, "audio_path": str(wav_b)},
-                {"source_speaker_id": "source_2", "duration_s": 5.0, "audio_path": str(wav_c)},
-            ]
-        ).to_csv(processed_metadata, index=False)
+        inventory = build_dataset_inventory(
+            config_path=fixture["config"],
+            raw_dir=fixture["raw_dir"],
+            processed_dir=fixture["processed_dir"],
+            processed_metadata_path=fixture["processed_metadata"],
+            manifest_path=fixture["manifest_path"],
+            speaker_selection_path=fixture["speaker_selection"],
+            json_out=fixture["json_out"],
+            sample_size=50,
+        )
+        cached_text_after = fixture["json_out"].read_text(encoding="utf-8")
 
-        manifest_path = tmp / "data/manifests/data_manifest.csv"
-        pd.DataFrame(
+    assert inventory == cached_inventory
+    assert cached_text_after == original_text
+
+
+def test_dataset_inventory_main_reports_cache_hit(monkeypatch, capsys) -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        fixture = _prepare_dataset_inventory_fixture(tmp)
+        cached_inventory = {
+            "raw": {
+                "overall_totals": {
+                    "total_clips": 1,
+                    "validated_clips": 1,
+                    "non_validated_clips": 0,
+                    "unique_speakers": 1,
+                    "formats": ["mp3"],
+                    "sample_rates_khz": ["48.0"],
+                    "channel_modes": ["stereo"],
+                },
+                "grouped_by_locale_variant_gender": [],
+            },
+            "processed": {
+                "speaker_count": 1,
+                "clip_count": 1,
+                "total_duration_s": 1.0,
+                "lowest_clip_speaker": {"speaker_id": "spk", "clip_count": 1, "total_duration_s": 1.0},
+                "highest_clip_speaker": {"speaker_id": "spk", "clip_count": 1, "total_duration_s": 1.0},
+                "formats": ["wav"],
+                "sample_rates_khz": ["16.0"],
+                "channel_modes": ["mono"],
+            },
+            "selected_speakers": {"warnings": []},
+            "warnings": [],
+        }
+        fixture["json_out"].parent.mkdir(parents=True, exist_ok=True)
+        fixture["json_out"].write_text(json.dumps(cached_inventory) + "\n", encoding="utf-8")
+
+        monkeypatch.setattr(
+            "tcc_audio.dataset_inventory._build_raw_inventory",
+            lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("main should load cached inventory")),
+        )
+
+        exit_code = dataset_inventory_main(
             [
-                {"speaker_id": "speaker_01", "split": "train", "duration_s": 1.5, "audio_path": str(wav_a)},
-                {"speaker_id": "speaker_01", "split": "val", "duration_s": 2.5, "audio_path": str(wav_b)},
-                {"speaker_id": "speaker_02", "split": "train", "duration_s": 5.0, "audio_path": str(wav_c)},
+                "-c",
+                str(fixture["config"]),
+                "--raw-dir",
+                str(fixture["raw_dir"]),
+                "--processed-dir",
+                str(fixture["processed_dir"]),
+                "--processed-metadata",
+                str(fixture["processed_metadata"]),
+                "--manifest",
+                str(fixture["manifest_path"]),
+                "--speaker-selection",
+                str(fixture["speaker_selection"]),
+                "-j",
+                str(fixture["json_out"]),
             ]
-        ).to_csv(manifest_path, index=False)
-        speaker_selection = tmp / "data/manifests/speaker_selection.csv"
-        pd.DataFrame([{"speaker_id": "speaker_01"}, {"speaker_id": "speaker_02"}]).to_csv(speaker_selection, index=False)
-        json_out = tmp / "artifacts/dataset_inventory.json"
+        )
+        output = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "RAW DATASET" in output
+    assert f"Loaded JSON inventory from {fixture['json_out']}" in output
+    assert f"Wrote JSON inventory to {fixture['json_out']}" not in output
+
+
+def test_build_dataset_inventory_override_rebuilds_and_overwrites_cache(monkeypatch) -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        fixture = _prepare_dataset_inventory_fixture(tmp)
+        fixture["json_out"].parent.mkdir(parents=True, exist_ok=True)
+        fixture["json_out"].write_text('{"raw": {"stale": true}, "processed": {}, "selected_speakers": {}}\n', encoding="utf-8")
 
         def fake_probe(path: Path) -> dict[str, str]:
             if path.suffix.lower() == ".mp3":
@@ -1057,17 +1182,78 @@ def test_build_dataset_inventory_reports_raw_processed_and_selected_speakers(mon
         monkeypatch.setattr("tcc_audio.dataset_inventory._probe_audio_file", fake_probe)
 
         inventory = build_dataset_inventory(
-            config_path=config,
-            raw_dir=raw_dir,
-            processed_dir=tmp / "data/processed/common_voice_pt",
-            processed_metadata_path=processed_metadata,
-            manifest_path=manifest_path,
-            speaker_selection_path=speaker_selection,
-            json_out=json_out,
+            config_path=fixture["config"],
+            raw_dir=fixture["raw_dir"],
+            processed_dir=fixture["processed_dir"],
+            processed_metadata_path=fixture["processed_metadata"],
+            manifest_path=fixture["manifest_path"],
+            speaker_selection_path=fixture["speaker_selection"],
+            json_out=fixture["json_out"],
+            sample_size=50,
+            override=True,
+        )
+        saved_json = json.loads(fixture["json_out"].read_text(encoding="utf-8"))
+
+    assert inventory["raw"]["overall_totals"]["total_clips"] == 3
+    assert saved_json["raw"]["overall_totals"]["total_clips"] == 3
+    assert "stale" not in saved_json["raw"]
+
+
+def test_build_dataset_inventory_rebuilds_when_cached_json_is_invalid(monkeypatch) -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        fixture = _prepare_dataset_inventory_fixture(tmp)
+        fixture["json_out"].parent.mkdir(parents=True, exist_ok=True)
+        fixture["json_out"].write_text("{invalid json\n", encoding="utf-8")
+
+        def fake_probe(path: Path) -> dict[str, str]:
+            if path.suffix.lower() == ".mp3":
+                return {"format": "mp3", "sample_rate_khz": "48.0", "channel_mode": "stereo"}
+            return {"format": "wav", "sample_rate_khz": "16.0", "channel_mode": "mono"}
+
+        monkeypatch.setattr("tcc_audio.dataset_inventory._probe_audio_file", fake_probe)
+
+        inventory = build_dataset_inventory(
+            config_path=fixture["config"],
+            raw_dir=fixture["raw_dir"],
+            processed_dir=fixture["processed_dir"],
+            processed_metadata_path=fixture["processed_metadata"],
+            manifest_path=fixture["manifest_path"],
+            speaker_selection_path=fixture["speaker_selection"],
+            json_out=fixture["json_out"],
             sample_size=50,
         )
+        saved_json = json.loads(fixture["json_out"].read_text(encoding="utf-8"))
+
+    assert inventory["processed"]["speaker_count"] == 2
+    assert saved_json["processed"]["speaker_count"] == 2
+
+
+def test_build_dataset_inventory_reports_raw_processed_and_selected_speakers(monkeypatch) -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        fixture = _prepare_dataset_inventory_fixture(tmp)
+
+        def fake_probe(path: Path) -> dict[str, str]:
+            if path.suffix.lower() == ".mp3":
+                return {"format": "mp3", "sample_rate_khz": "48.0", "channel_mode": "stereo"}
+            return {"format": "wav", "sample_rate_khz": "16.0", "channel_mode": "mono"}
+
+        monkeypatch.setattr("tcc_audio.dataset_inventory._probe_audio_file", fake_probe)
+
+        inventory = build_dataset_inventory(
+            config_path=fixture["config"],
+            raw_dir=fixture["raw_dir"],
+            processed_dir=fixture["processed_dir"],
+            processed_metadata_path=fixture["processed_metadata"],
+            manifest_path=fixture["manifest_path"],
+            speaker_selection_path=fixture["speaker_selection"],
+            json_out=fixture["json_out"],
+            sample_size=50,
+            override=True,
+        )
         report = render_dataset_inventory(inventory)
-        saved_json = json.loads(json_out.read_text(encoding="utf-8"))
+        saved_json = json.loads(fixture["json_out"].read_text(encoding="utf-8"))
 
     assert set(inventory.keys()) >= {"raw", "processed", "selected_speakers", "sampling", "paths"}
     assert inventory["raw"]["overall_totals"]["total_clips"] == 3

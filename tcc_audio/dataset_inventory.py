@@ -37,6 +37,9 @@ class InventoryPaths:
     json_out: Path
 
 
+REQUIRED_INVENTORY_KEYS = {"raw", "processed", "selected_speakers"}
+
+
 def _strip(value: object, default: str = "") -> str:
     text = str(value).strip()
     return text if text else default
@@ -369,28 +372,27 @@ def _build_selected_speakers_inventory(
     return inventory, inventory["warnings"]
 
 
-def build_dataset_inventory(
+def _is_compatible_inventory_payload(payload: object) -> bool:
+    return isinstance(payload, Mapping) and REQUIRED_INVENTORY_KEYS.issubset(payload.keys())
+
+
+def _load_cached_inventory(json_out: Path) -> dict[str, Any] | None:
+    if not json_out.exists():
+        return None
+    try:
+        payload = json.loads(json_out.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if not _is_compatible_inventory_payload(payload):
+        return None
+    return dict(payload)
+
+
+def _rebuild_dataset_inventory(
     *,
-    config_path: str | Path = DEFAULT_CONFIG_PATH,
-    raw_dir: str | Path | None = None,
-    processed_dir: str | Path | None = None,
-    raw_metadata_path: str | Path | None = None,
-    processed_metadata_path: str | Path | None = None,
-    manifest_path: str | Path | None = None,
-    speaker_selection_path: str | Path | None = None,
-    json_out: str | Path | None = None,
-    sample_size: int = 50,
+    paths: InventoryPaths,
+    sample_size: int,
 ) -> dict[str, Any]:
-    paths = resolve_inventory_paths(
-        config_path=config_path,
-        raw_dir=raw_dir,
-        processed_dir=processed_dir,
-        raw_metadata_path=raw_metadata_path,
-        processed_metadata_path=processed_metadata_path,
-        manifest_path=manifest_path,
-        speaker_selection_path=speaker_selection_path,
-        json_out=json_out,
-    )
     config = read_yaml(paths.config_path)
 
     raw_inventory, raw_warnings = _build_raw_inventory(paths.raw_dir, sample_size)
@@ -421,6 +423,66 @@ def build_dataset_inventory(
 
     ensure_parent_dir(paths.json_out)
     paths.json_out.write_text(json.dumps(inventory, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+    return inventory
+
+
+def _resolve_dataset_inventory(
+    *,
+    config_path: str | Path = DEFAULT_CONFIG_PATH,
+    raw_dir: str | Path | None = None,
+    processed_dir: str | Path | None = None,
+    raw_metadata_path: str | Path | None = None,
+    processed_metadata_path: str | Path | None = None,
+    manifest_path: str | Path | None = None,
+    speaker_selection_path: str | Path | None = None,
+    json_out: str | Path | None = None,
+    sample_size: int = 50,
+    override: bool = False,
+) -> tuple[dict[str, Any], bool]:
+    paths = resolve_inventory_paths(
+        config_path=config_path,
+        raw_dir=raw_dir,
+        processed_dir=processed_dir,
+        raw_metadata_path=raw_metadata_path,
+        processed_metadata_path=processed_metadata_path,
+        manifest_path=manifest_path,
+        speaker_selection_path=speaker_selection_path,
+        json_out=json_out,
+    )
+
+    if not override:
+        cached_inventory = _load_cached_inventory(paths.json_out)
+        if cached_inventory is not None:
+            return cached_inventory, True
+
+    return _rebuild_dataset_inventory(paths=paths, sample_size=sample_size), False
+
+
+def build_dataset_inventory(
+    *,
+    config_path: str | Path = DEFAULT_CONFIG_PATH,
+    raw_dir: str | Path | None = None,
+    processed_dir: str | Path | None = None,
+    raw_metadata_path: str | Path | None = None,
+    processed_metadata_path: str | Path | None = None,
+    manifest_path: str | Path | None = None,
+    speaker_selection_path: str | Path | None = None,
+    json_out: str | Path | None = None,
+    sample_size: int = 50,
+    override: bool = False,
+) -> dict[str, Any]:
+    inventory, _ = _resolve_dataset_inventory(
+        config_path=config_path,
+        raw_dir=raw_dir,
+        processed_dir=processed_dir,
+        raw_metadata_path=raw_metadata_path,
+        processed_metadata_path=processed_metadata_path,
+        manifest_path=manifest_path,
+        speaker_selection_path=speaker_selection_path,
+        json_out=json_out,
+        sample_size=sample_size,
+        override=override,
+    )
     return inventory
 
 
@@ -496,12 +558,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--speaker-selection")
     parser.add_argument("-j", "--json-out", default=str(DEFAULT_JSON_OUT))
     parser.add_argument("--sample-size", type=int, default=5)
+    parser.add_argument("--override", action="store_true")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    inventory = build_dataset_inventory(
+    inventory, loaded_from_cache = _resolve_dataset_inventory(
         config_path=args.config,
         raw_dir=args.raw_dir,
         processed_dir=args.processed_dir,
@@ -511,9 +574,13 @@ def main(argv: list[str] | None = None) -> int:
         speaker_selection_path=args.speaker_selection,
         json_out=args.json_out,
         sample_size=args.sample_size,
+        override=args.override,
     )
     print(render_dataset_inventory(inventory), end="")
-    print(f"Wrote JSON inventory to {args.json_out}")
+    if loaded_from_cache:
+        print(f"Loaded JSON inventory from {args.json_out}")
+    else:
+        print(f"Wrote JSON inventory to {args.json_out}")
     return 0
 
 

@@ -95,6 +95,14 @@ Registre o inventário hierárquico dos dados:
 python3 scripts/log_dataset_inventory.py
 ```
 
+Por padrão, se `artifacts/dataset_inventory.json` já existir, o comando reaproveita esse arquivo e apenas imprime o mesmo relatório no console sem recalcular o inventário.
+
+Para forçar uma nova geração e sobrescrever o JSON:
+
+```bash
+python3 scripts/log_dataset_inventory.py --override
+```
+
 Valide manifesto e prompts antes do treino:
 
 ```bash

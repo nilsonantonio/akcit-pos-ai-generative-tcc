@@ -350,6 +350,8 @@ Resumo da seleção final de speakers, com duração total, áudio de referênci
 
 Inventário hierárquico do estado do dataset e da amostragem. É útil para verificar rapidamente o que existe em `raw`, `processed` e no subconjunto de speakers escolhidos.
 
+O comando `python3 scripts/log_dataset_inventory.py` usa esse arquivo como cache por padrão: se ele já existir, o conteúdo salvo é reapresentado no console sem recalcular o inventário. Use `python3 scripts/log_dataset_inventory.py --override` para reconstruir o inventário e sobrescrever o JSON.
+
 ### `run_matrix.csv`
 
 Expansão do YAML em execuções concretas. Aqui o desenho experimental vira linhas reais combinando:
