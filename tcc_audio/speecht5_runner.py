@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import inspect
+import json
 import math
 import os
 import sys
@@ -112,6 +114,79 @@ class CheckpointRecord:
 
 def _path_safe_utc_timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _build_condition_run_root(checkpoint_dir: str | Path, condition_id: str, run_ts: str) -> Path:
+    return Path(checkpoint_dir) / condition_id / run_ts
+
+
+def _training_log_path(checkpoint_dir: str | Path, condition_id: str, run_ts: str) -> Path:
+    return _build_condition_run_root(checkpoint_dir, condition_id, run_ts) / "training.log"
+
+
+def _training_metadata_path(checkpoint_dir: str | Path, condition_id: str, run_ts: str) -> Path:
+    return _build_condition_run_root(checkpoint_dir, condition_id, run_ts) / "metadata.json"
+
+
+class _TeeTextIO:
+    def __init__(self, *streams: object) -> None:
+        self._streams = streams
+
+    def write(self, data: str) -> int:
+        for stream in self._streams:
+            stream.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        for stream in self._streams:
+            stream.flush()
+
+    def isatty(self) -> bool:
+        return any(getattr(stream, "isatty", lambda: False)() for stream in self._streams)
+
+
+@contextlib.contextmanager
+def _tee_console_output(log_path: str | Path):
+    ensure_parent_dir(log_path)
+    with Path(log_path).open("a", encoding="utf-8") as handle:
+        stdout = _TeeTextIO(sys.stdout, handle)
+        stderr = _TeeTextIO(sys.stderr, handle)
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            yield
+
+
+def _write_training_metadata(
+    *,
+    metadata_path: str | Path,
+    condition_id: str,
+    run_ts: str,
+    training_scope: str,
+    started_at: str,
+    finished_at: str,
+    training_seconds: float,
+    training_gpu_hours_total: float,
+    training_units_total: int,
+    checkpoints_total: int,
+    dataset_train_rows_total: int,
+    dataset_val_rows_total: int,
+    dataset_inference_rows_total: int,
+) -> None:
+    payload = {
+        "condition_id": condition_id,
+        "run_ts": run_ts,
+        "training_scope": training_scope,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "training_seconds": training_seconds,
+        "training_gpu_hours_total": training_gpu_hours_total,
+        "training_units_total": training_units_total,
+        "checkpoints_total": checkpoints_total,
+        "dataset_train_rows_total": dataset_train_rows_total,
+        "dataset_val_rows_total": dataset_val_rows_total,
+        "dataset_inference_rows_total": dataset_inference_rows_total,
+    }
+    ensure_parent_dir(metadata_path)
+    Path(metadata_path).write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
 
 
 def _resolve_lora_conditions(
@@ -436,7 +511,7 @@ def _log_training_dataset_summary(
 
 
 def _build_checkpoint_root(checkpoint_dir: str | Path, condition_id: str, run_ts: str, training_unit: str) -> Path:
-    return Path(checkpoint_dir) / condition_id / run_ts / training_unit
+    return _build_condition_run_root(checkpoint_dir, condition_id, run_ts) / training_unit
 
 
 def _checkpoint_dirs(output_dir: str | Path) -> list[Path]:
@@ -578,6 +653,10 @@ def _train_condition(
     training_config = dict(condition.get("training", {}))
     lora_config = dict(condition.get("lora", {}))
     run_ts = _path_safe_utc_timestamp()
+    condition_run_root = _build_condition_run_root(checkpoint_dir, condition_id, run_ts)
+    condition_run_root.mkdir(parents=True, exist_ok=True)
+    log_path = _training_log_path(checkpoint_dir, condition_id, run_ts)
+    metadata_path = _training_metadata_path(checkpoint_dir, condition_id, run_ts)
 
     train_rows = manifest[manifest["split"].eq("train")].copy()
     val_rows = manifest[manifest["split"].eq("val")].copy()
@@ -590,76 +669,105 @@ def _train_condition(
     processor = stack["SpeechT5Processor"].from_pretrained(config["project"]["primary_model"])
     speaker_embedding_map = _prepare_speaker_embedding_map(config["data"]["speaker_embeddings_index"])
     dataset_class = _build_dataset(manifest, speaker_embedding_map, sample_rate)
+    run_started_at = now_utc_iso()
+    run_started_perf = time.perf_counter()
+    training_units_total = 0
+    checkpoints_total = 0
+    dataset_inference_rows_total = 0
+    training_gpu_hours_total = 0.0
 
-    for training_unit, unit_train_rows, unit_val_rows in _iter_training_units(train_rows, val_rows, training_scope):
-        model = stack["SpeechT5ForTextToSpeech"].from_pretrained(config["project"]["primary_model"])
-        model = _apply_lora_adapter(model, lora_config)
+    with _tee_console_output(log_path):
+        for training_unit, unit_train_rows, unit_val_rows in _iter_training_units(train_rows, val_rows, training_scope):
+            training_units_total += 1
+            model = stack["SpeechT5ForTextToSpeech"].from_pretrained(config["project"]["primary_model"])
+            model = _apply_lora_adapter(model, lora_config)
 
-        output_dir = _build_checkpoint_root(checkpoint_dir, condition_id, run_ts, training_unit)
-        output_dir.mkdir(parents=True, exist_ok=True)
+            output_dir = _build_checkpoint_root(checkpoint_dir, condition_id, run_ts, training_unit)
+            output_dir.mkdir(parents=True, exist_ok=True)
 
-        training_args = _build_training_args(
-            stack=stack,
-            output_dir=output_dir,
-            training_config=training_config,
-            has_eval_dataset=not unit_val_rows.empty,
-        )
-        trainer = _build_trainer(
-            stack=stack,
-            model=model,
-            training_args=training_args,
-            processor=processor,
-            train_dataset=dataset_class(unit_train_rows, processor),
-            eval_dataset=dataset_class(unit_val_rows, processor) if not unit_val_rows.empty else None,
-        )
+            training_args = _build_training_args(
+                stack=stack,
+                output_dir=output_dir,
+                training_config=training_config,
+                has_eval_dataset=not unit_val_rows.empty,
+            )
+            trainer = _build_trainer(
+                stack=stack,
+                model=model,
+                training_args=training_args,
+                processor=processor,
+                train_dataset=dataset_class(unit_train_rows, processor),
+                eval_dataset=dataset_class(unit_val_rows, processor) if not unit_val_rows.empty else None,
+            )
 
-        _log_training_dataset_summary(
-            condition_id=condition_id,
-            scope=training_scope,
-            training_unit=training_unit,
-            train_rows=unit_train_rows,
-            phase="train:start",
-        )
-        started = time.perf_counter()
-        trainer.train()
-        elapsed_hours = (time.perf_counter() - started) / 3600.0
-        trainer.save_model()
-        _log_training_dataset_summary(
-            condition_id=condition_id,
-            scope=training_scope,
-            training_unit=training_unit,
-            train_rows=unit_train_rows,
-            phase="train:end",
-        )
-
-        checkpoints = _checkpoint_dirs(output_dir)
-        if not checkpoints:
-            print(f"Warning: no checkpoints were saved for `{condition_id}` training unit `{training_unit}`.")
-            continue
-
-        for checkpoint in checkpoints:
-            checkpoint_step = _checkpoint_step(checkpoint)
-            sample_ids = materialize_checkpoint_samples(
-                samples_path=samples_path,
+            _log_training_dataset_summary(
                 condition_id=condition_id,
-                checkpoint_step=checkpoint_step,
-                checkpoint_path=checkpoint,
-                checkpoint_run_ts=run_ts,
-                training_scope=training_scope,
+                scope=training_scope,
                 training_unit=training_unit,
-                audio_base_dir=audio_base_dir,
-                total_train_gpu_hours=elapsed_hours,
-                gpu_hourly_rate=gpu_hourly_rate,
+                train_rows=unit_train_rows,
+                phase="train:start",
             )
-            if not sample_ids:
-                continue
-            run_condition_inference(
-                config_path=config_path,
-                samples_path=samples_path,
+            started = time.perf_counter()
+            trainer.train()
+            elapsed_hours = (time.perf_counter() - started) / 3600.0
+            training_gpu_hours_total += elapsed_hours
+            trainer.save_model()
+            _log_training_dataset_summary(
                 condition_id=condition_id,
-                checkpoint_dir=checkpoint,
-                sample_ids=sample_ids,
+                scope=training_scope,
+                training_unit=training_unit,
+                train_rows=unit_train_rows,
+                phase="train:end",
             )
+
+            checkpoints = _checkpoint_dirs(output_dir)
+            checkpoints_total += len(checkpoints)
+            if not checkpoints:
+                print(f"Warning: no checkpoints were saved for `{condition_id}` training unit `{training_unit}`.")
+                continue
+
+            for checkpoint in checkpoints:
+                checkpoint_step = _checkpoint_step(checkpoint)
+                sample_ids = materialize_checkpoint_samples(
+                    samples_path=samples_path,
+                    condition_id=condition_id,
+                    checkpoint_step=checkpoint_step,
+                    checkpoint_path=checkpoint,
+                    checkpoint_run_ts=run_ts,
+                    training_scope=training_scope,
+                    training_unit=training_unit,
+                    audio_base_dir=audio_base_dir,
+                    total_train_gpu_hours=elapsed_hours,
+                    gpu_hourly_rate=gpu_hourly_rate,
+                )
+                dataset_inference_rows_total += len(sample_ids)
+                if not sample_ids:
+                    continue
+                run_condition_inference(
+                    config_path=config_path,
+                    samples_path=samples_path,
+                    condition_id=condition_id,
+                    checkpoint_dir=checkpoint,
+                    sample_ids=sample_ids,
+                )
+
+    run_finished_at = now_utc_iso()
+    training_seconds = time.perf_counter() - run_started_perf
+    _write_training_metadata(
+        metadata_path=metadata_path,
+        condition_id=condition_id,
+        run_ts=run_ts,
+        training_scope=training_scope,
+        started_at=run_started_at,
+        finished_at=run_finished_at,
+        training_seconds=training_seconds,
+        training_gpu_hours_total=training_gpu_hours_total,
+        training_units_total=training_units_total,
+        checkpoints_total=checkpoints_total,
+        dataset_train_rows_total=len(train_rows),
+        dataset_val_rows_total=len(val_rows),
+        dataset_inference_rows_total=dataset_inference_rows_total,
+    )
 
     return load_samples(samples_path)
 

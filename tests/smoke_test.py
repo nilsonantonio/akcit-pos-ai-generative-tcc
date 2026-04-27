@@ -52,11 +52,16 @@ from tcc_audio.samples import initialize_samples, materialize_checkpoint_samples
 from tcc_audio.speaker_selection import select_speakers
 from tcc_audio.speaker_embeddings import extract_speaker_embeddings
 from tcc_audio.speecht5_runner import (
+    _build_condition_run_root,
     _apply_lora_adapter,
     _log_training_dataset_summary,
     _load_speaker_embedding,
     _load_torch_stack,
     _load_training_stack,
+    _tee_console_output,
+    _training_log_path,
+    _training_metadata_path,
+    _write_training_metadata,
     build_lora_arg_parser,
 )
 from tcc_audio.training_cleanup import (
@@ -464,6 +469,61 @@ def test_log_training_dataset_summary_for_unique(capsys) -> None:
     assert "[LoRA train:end]" in output
 
 
+def test_tee_console_output_writes_to_console_and_log(capsys) -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        log_path = _training_log_path(tmp / "artifacts/checkpoints/lora", "cond_a", "20260427T010203Z")
+
+        with _tee_console_output(log_path):
+            print("stdout line")
+            print("stderr line", file=sys.stderr)
+
+        output = capsys.readouterr()
+        log_text = log_path.read_text(encoding="utf-8")
+
+    assert "stdout line" in output.out
+    assert "stderr line" in output.err
+    assert "stdout line" in log_text
+    assert "stderr line" in log_text
+
+
+def test_write_training_metadata_creates_expected_payload() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        metadata_path = _training_metadata_path(tmp / "artifacts/checkpoints/lora", "cond_a", "20260427T010203Z")
+        _write_training_metadata(
+            metadata_path=metadata_path,
+            condition_id="cond_a",
+            run_ts="20260427T010203Z",
+            training_scope="per_speaker",
+            started_at="2026-04-27T01:02:03+00:00",
+            finished_at="2026-04-27T01:12:03+00:00",
+            training_seconds=600.0,
+            training_gpu_hours_total=0.5,
+            training_units_total=2,
+            checkpoints_total=3,
+            dataset_train_rows_total=12,
+            dataset_val_rows_total=4,
+            dataset_inference_rows_total=24,
+        )
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+    assert payload == {
+        "condition_id": "cond_a",
+        "run_ts": "20260427T010203Z",
+        "training_scope": "per_speaker",
+        "started_at": "2026-04-27T01:02:03+00:00",
+        "finished_at": "2026-04-27T01:12:03+00:00",
+        "training_seconds": 600.0,
+        "training_gpu_hours_total": 0.5,
+        "training_units_total": 2,
+        "checkpoints_total": 3,
+        "dataset_train_rows_total": 12,
+        "dataset_val_rows_total": 4,
+        "dataset_inference_rows_total": 24,
+    }
+
+
 def test_build_cleanup_arg_parser_and_resolve_defaults() -> None:
     with TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
@@ -538,6 +598,10 @@ def test_cleanup_training_results_removes_condition_artifacts() -> None:
         checkpoint_a = tmp / "artifacts/checkpoints/lora/cond_a"
         checkpoint_a.mkdir(parents=True, exist_ok=True)
         (checkpoint_a / "marker.txt").write_text("x", encoding="utf-8")
+        run_root_a = _build_condition_run_root(tmp / "artifacts/checkpoints/lora", "cond_a", "20260427T010203Z")
+        run_root_a.mkdir(parents=True, exist_ok=True)
+        (run_root_a / "training.log").write_text("log", encoding="utf-8")
+        (run_root_a / "metadata.json").write_text("{}", encoding="utf-8")
         checkpoint_b = tmp / "artifacts/checkpoints/lora/cond_b"
         checkpoint_b.mkdir(parents=True, exist_ok=True)
         (checkpoint_b / "marker.txt").write_text("x", encoding="utf-8")
@@ -561,6 +625,8 @@ def test_cleanup_training_results_removes_condition_artifacts() -> None:
         remaining = load_samples(samples_path)
         checkpoint_a_exists = checkpoint_a.exists()
         checkpoint_b_exists = checkpoint_b.exists()
+        training_log_exists = (run_root_a / "training.log").exists()
+        training_metadata_exists = (run_root_a / "metadata.json").exists()
         audio_a_exists = audio_a.exists()
         report_assets_exists = report_assets.exists()
         evaluation_files_exist = [
@@ -572,6 +638,8 @@ def test_cleanup_training_results_removes_condition_artifacts() -> None:
         assert result.removed_materialized_rows == 1
         assert checkpoint_a_exists is False
         assert checkpoint_b_exists is True
+        assert training_log_exists is False
+        assert training_metadata_exists is False
         assert audio_a_exists is False
         assert report_assets_exists is False
         assert remaining["sample_id"].tolist() == ["base_a", "mat_b"]
