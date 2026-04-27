@@ -43,6 +43,7 @@ conditions:
       use_rslora: false
     training:
       scope: per_speaker
+      gpu_hourly_rate: 0.0
       max_steps: 1500
       learning_rate: 3.0e-5
       warmup_ratio: 0.05
@@ -84,6 +85,7 @@ conditions:
       use_rslora: false
     training:
       scope: unique
+      gpu_hourly_rate: 0.0
       max_steps: 1000
       learning_rate: 5.0e-5
       warmup_ratio: 0.05

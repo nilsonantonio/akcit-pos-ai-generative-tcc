@@ -55,6 +55,7 @@ from tcc_audio.speecht5_runner import (
     _build_condition_run_root,
     _apply_lora_adapter,
     _log_training_dataset_summary,
+    _resolve_gpu_hourly_rate,
     _load_speaker_embedding,
     _load_torch_stack,
     _load_training_stack,
@@ -403,6 +404,82 @@ def test_build_lora_arg_parser_accepts_repeated_condition_flags() -> None:
     )
 
     assert args.condition == ["cond_a", "cond_b"]
+    assert args.gpu_hourly_rate is None
+
+
+def test_build_lora_arg_parser_accepts_gpu_hourly_rate_override() -> None:
+    parser = build_lora_arg_parser()
+    args = parser.parse_args(
+        [
+            "--config",
+            "config.yaml",
+            "--samples",
+            "samples.csv",
+            "--manifest",
+            "manifest.csv",
+            "--checkpoint-dir",
+            "artifacts/checkpoints",
+            "--gpu-hourly-rate",
+            "1.75",
+        ]
+    )
+
+    assert args.gpu_hourly_rate == 1.75
+
+
+def test_resolve_gpu_hourly_rate_uses_condition_value_without_cli_override() -> None:
+    condition = {
+        "id": "cond_a",
+        "training": {
+            "scope": "per_speaker",
+            "gpu_hourly_rate": 2.5,
+        },
+    }
+
+    assert _resolve_gpu_hourly_rate(condition) == 2.5
+
+
+def test_resolve_gpu_hourly_rate_cli_override_wins() -> None:
+    condition = {
+        "id": "cond_a",
+        "training": {
+            "scope": "per_speaker",
+            "gpu_hourly_rate": 2.5,
+        },
+    }
+
+    assert _resolve_gpu_hourly_rate(condition, cli_override=4.0) == 4.0
+
+
+def test_resolve_gpu_hourly_rate_defaults_to_zero_when_missing() -> None:
+    condition = {
+        "id": "cond_a",
+        "training": {
+            "scope": "per_speaker",
+        },
+    }
+
+    assert _resolve_gpu_hourly_rate(condition) == 0.0
+
+
+def test_resolve_gpu_hourly_rate_supports_distinct_values_per_condition() -> None:
+    conservative = {
+        "id": "cond_a",
+        "training": {
+            "scope": "per_speaker",
+            "gpu_hourly_rate": 1.25,
+        },
+    }
+    unique = {
+        "id": "cond_b",
+        "training": {
+            "scope": "unique",
+            "gpu_hourly_rate": 2.75,
+        },
+    }
+
+    assert _resolve_gpu_hourly_rate(conservative) == 1.25
+    assert _resolve_gpu_hourly_rate(unique) == 2.75
 
 
 def test_log_training_dataset_summary_for_per_speaker(capsys) -> None:

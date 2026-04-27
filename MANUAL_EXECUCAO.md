@@ -151,11 +151,12 @@ python3 scripts/run_speecht5_lora.py \
   --config configs/speecht5_minimal.yaml \
   --manifest data/manifests/data_manifest.csv \
   --samples artifacts/evaluation/samples.csv \
-  --checkpoint-dir artifacts/checkpoints/lora \
-  --gpu-hourly-rate 0.0
+  --checkpoint-dir artifacts/checkpoints/lora
 ```
 
 Sem `--condition`, o script percorre todas as condicionais LoRA do YAML em sequencia.
+
+Defina `training.gpu_hourly_rate` dentro de cada condicional LoRA no YAML. Use `--gpu-hourly-rate` apenas quando quiser sobrescrever globalmente a taxa configurada nas condicionais durante aquela execucao.
 
 Cada checkpoint salvo em `checkpoint-<step>` vira um braco independente de avaliacao e materializa novas linhas no `samples.csv`.
 
@@ -232,9 +233,10 @@ python3 scripts/run_speecht5_lora.py \
   --samples artifacts/evaluation/samples.csv \
   --checkpoint-dir artifacts/checkpoints/lora \
   --condition speecht5_lora_conservative \
-  --condition speecht5_lora_unique \
-  --gpu-hourly-rate 0.0
+  --condition speecht5_lora_unique
 ```
+
+Se precisar sobrescrever a taxa de todas as condicionais selecionadas nessa chamada, adicione `--gpu-hourly-rate <valor>`.
 
 Preencha custos de treino depois da execucao, quando necessario.
 

@@ -219,6 +219,17 @@ def _training_scope(condition: Mapping[str, Any]) -> str:
     return scope
 
 
+def _resolve_gpu_hourly_rate(condition: Mapping[str, Any], cli_override: float | None = None) -> float:
+    if cli_override is not None:
+        return float(cli_override)
+    training = condition.get("training", {})
+    if isinstance(training, Mapping):
+        configured = training.get("gpu_hourly_rate")
+        if configured not in (None, ""):
+            return float(configured)
+    return 0.0
+
+
 def _load_embedding(path: str | Path) -> np.ndarray:
     embedding = np.load(path)
     return embedding.reshape(1, -1).astype(np.float32)
@@ -643,7 +654,7 @@ def _train_condition(
     samples_path: str | Path,
     checkpoint_dir: str | Path,
     condition: Mapping[str, Any],
-    gpu_hourly_rate: float,
+    gpu_hourly_rate_override: float | None,
     audio_base_dir: str | Path,
 ) -> pd.DataFrame:
     config = read_yaml(config_path)
@@ -652,6 +663,7 @@ def _train_condition(
     training_scope = _training_scope(condition)
     training_config = dict(condition.get("training", {}))
     lora_config = dict(condition.get("lora", {}))
+    gpu_hourly_rate = _resolve_gpu_hourly_rate(condition, cli_override=gpu_hourly_rate_override)
     run_ts = _path_safe_utc_timestamp()
     condition_run_root = _build_condition_run_root(checkpoint_dir, condition_id, run_ts)
     condition_run_root.mkdir(parents=True, exist_ok=True)
@@ -777,7 +789,7 @@ def run_lora_pipeline(
     manifest_path: str | Path,
     samples_path: str | Path,
     checkpoint_dir: str | Path,
-    gpu_hourly_rate: float = 0.0,
+    gpu_hourly_rate: float | None = None,
     condition_ids: Iterable[str] | None = None,
     audio_base_dir: str | Path = "artifacts/audio",
 ) -> pd.DataFrame:
@@ -793,7 +805,7 @@ def run_lora_pipeline(
             samples_path=samples_path,
             checkpoint_dir=checkpoint_dir,
             condition=condition,
-            gpu_hourly_rate=gpu_hourly_rate,
+            gpu_hourly_rate_override=gpu_hourly_rate,
             audio_base_dir=audio_base_dir,
         )
     return load_samples(samples_path)
@@ -816,7 +828,7 @@ def build_lora_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--gpu-hourly-rate",
         type=float,
-        default=0.0,
-        help="GPU hourly rate used to estimate cost_usd for each checkpoint-evaluated training unit.",
+        default=None,
+        help="Optional global override for training.gpu_hourly_rate defined in each LoRA condition.",
     )
     return parser

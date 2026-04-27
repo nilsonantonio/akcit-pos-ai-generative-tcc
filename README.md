@@ -396,6 +396,8 @@ Isso torna o desenho explícito e auditável. Você consegue inspecionar o exper
 
 Cada condição `LoRA` é treinada conforme o YAML. O treino salva checkpoints em passos definidos, e cada checkpoint passa a ser um candidato real de avaliação.
 
+`training.gpu_hourly_rate` também é definido por condicional no YAML. O parâmetro `--gpu-hourly-rate` do entrypoint existe apenas como sobrescrita global opcional da execução.
+
 ### 9. Materializar áudio por checkpoint
 
 Quando um checkpoint é salvo, o pipeline gera áudio com ele e preenche novas linhas no ledger. Isso transforma o histórico do treino em um conjunto comparável de saídas.
@@ -561,6 +563,7 @@ Este perfil é próximo da configuração oficial atual. A ideia é adaptar com 
     target_modules: [q_proj, k_proj, v_proj, out_proj]
   training:
     scope: per_speaker
+    gpu_hourly_rate: 0.0
     max_steps: 1500
     learning_rate: 3.0e-5
     per_device_train_batch_size: 2
@@ -597,6 +600,7 @@ Este perfil aumenta capacidade e pressão de otimização. Deve ser lido como po
     target_modules: [q_proj, k_proj, v_proj, out_proj]
   training:
     scope: unique
+    gpu_hourly_rate: 0.0
     max_steps: 2500
     learning_rate: 5.0e-5
     per_device_train_batch_size: 4
