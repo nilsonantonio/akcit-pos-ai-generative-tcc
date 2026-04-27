@@ -814,6 +814,60 @@ def test_build_dataset_inventory_reports_raw_processed_and_selected_speakers(mon
     assert "WARNINGS" not in report
 
 
+def test_build_dataset_inventory_reports_single_clip_speaker_as_train_only(monkeypatch) -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        config = _write_inventory_config(tmp)
+        raw_dir = tmp / "data/raw/common_voice_pt"
+        clips_dir = raw_dir / "clips"
+        clips_dir.mkdir(parents=True, exist_ok=True)
+        (clips_dir / "clip_a.mp3").write_bytes(b"fake")
+        (raw_dir / "validated.tsv").write_text(
+            "client_id\tpath\ttext\tgender\tlocale\tvariant\n"
+            "spk1\tclip_a.mp3\tTexto A\tmale\tpt\tpt-BR\n",
+            encoding="utf-8",
+        )
+
+        processed_metadata = tmp / "data/manifests/common_voice_curated.csv"
+        processed_metadata.parent.mkdir(parents=True, exist_ok=True)
+        wav_a = tmp / "data/processed/common_voice_pt/source_1/a.wav"
+        _write_wav(wav_a)
+        pd.DataFrame([{"source_speaker_id": "source_1", "duration_s": 1.5, "audio_path": str(wav_a)}]).to_csv(
+            processed_metadata, index=False
+        )
+
+        manifest_path = tmp / "data/manifests/data_manifest.csv"
+        pd.DataFrame([{"speaker_id": "speaker_01", "split": "train", "duration_s": 1.5, "audio_path": str(wav_a)}]).to_csv(
+            manifest_path, index=False
+        )
+        speaker_selection = tmp / "data/manifests/speaker_selection.csv"
+        pd.DataFrame([{"speaker_id": "speaker_01"}]).to_csv(speaker_selection, index=False)
+        json_out = tmp / "artifacts/dataset_inventory.json"
+
+        monkeypatch.setattr(
+            "tcc_audio.dataset_inventory._probe_audio_file",
+            lambda path: {"format": "wav", "sample_rate_khz": "16.0", "channel_mode": "mono"},
+        )
+
+        inventory = build_dataset_inventory(
+            config_path=config,
+            raw_dir=raw_dir,
+            processed_dir=tmp / "data/processed/common_voice_pt",
+            processed_metadata_path=processed_metadata,
+            manifest_path=manifest_path,
+            speaker_selection_path=speaker_selection,
+            json_out=json_out,
+            sample_size=50,
+        )
+
+    speaker = inventory["selected_speakers"]["per_speaker"]["speakers"][0]
+    assert speaker["speaker_id"] == "speaker_01"
+    assert speaker["train_clip_count"] == 1
+    assert speaker["val_clip_count"] == 0
+    assert speaker["train_duration_s"] == 1.5
+    assert speaker["val_duration_s"] == 0.0
+
+
 def test_build_dataset_inventory_degrades_when_ffprobe_is_unavailable(monkeypatch) -> None:
     with TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
@@ -969,6 +1023,49 @@ def test_speaker_selection_includes_shorter_speakers_when_ranked_globally() -> N
         assert float(shorter["total_duration_s"]) < 20 * 60
         assert float(shorter["selected_train_duration_s"]) + float(shorter["selected_val_duration_s"]) == 710.0
         assert manifest["speaker_id"].nunique() == 4
+
+
+def test_speaker_selection_assigns_single_selected_clip_to_train() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        rows = [
+            {
+                "source_speaker_id": "speaker_a",
+                "gender": "unknown",
+                "utterance_id": "speaker_a_0",
+                "duration_s": 600,
+                "audio_path": "audio/speaker_a_0.wav",
+                "target_text": "Texto de teste.",
+                "license": "CC0",
+                "source": "common_voice_pt",
+            },
+            {
+                "source_speaker_id": "speaker_b",
+                "gender": "feminine",
+                "utterance_id": "speaker_b_0",
+                "duration_s": 590,
+                "audio_path": "audio/speaker_b_0.wav",
+                "target_text": "Outro texto.",
+                "license": "CC0",
+                "source": "common_voice_pt",
+            },
+        ]
+        metadata = tmp / "metadata.csv"
+        pd.DataFrame(rows).to_csv(metadata, index=False)
+
+        manifest, speaker_selection = select_speakers(
+            metadata,
+            tmp / "data_manifest.csv",
+            tmp / "speaker_selection.csv",
+            speaker_target_count=2,
+            minutes_per_speaker=20,
+        )
+
+    assert manifest["speaker_id"].nunique() == 2
+    assert set(manifest["split"]) == {"train"}
+    assert not manifest.groupby("speaker_id")["split"].apply(lambda values: (values == "train").any()).eq(False).any()
+    assert (speaker_selection["selected_train_duration_s"].astype(float) > 0).all()
+    assert (speaker_selection["selected_val_duration_s"].astype(float) == 0.0).all()
 
 
 def test_speaker_selection_handles_unknown_majority_without_gender_buckets() -> None:

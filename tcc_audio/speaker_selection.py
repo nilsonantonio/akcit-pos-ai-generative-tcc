@@ -29,6 +29,12 @@ def _validate_input(metadata: pd.DataFrame) -> None:
         raise ValueError(f"Missing speaker selection input columns: {', '.join(missing)}")
 
 
+def _validation_count(selected_count: int, val_ratio: float) -> int:
+    if selected_count <= 1:
+        return 0
+    return min(max(1, int(round(selected_count * val_ratio))), selected_count - 1)
+
+
 def select_speakers(
     metadata_path: str | Path,
     manifest_out: str | Path,
@@ -73,7 +79,8 @@ def select_speakers(
             continue
 
         selected_df = pd.DataFrame(selected_rows)
-        val_count = max(1, int(round(len(selected_df) * val_ratio)))
+        # Preserve at least one training clip for every selected speaker.
+        val_count = _validation_count(len(selected_df), val_ratio)
         speaker_id = f"speaker_{len(selected_speaker_rows) + 1:02d}"
         reference_row = selected_df.iloc[0]
 

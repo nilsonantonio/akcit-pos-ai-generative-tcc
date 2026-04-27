@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -17,6 +17,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /workspace
 
 COPY requirements-linux-gpu.txt /tmp/requirements-linux-gpu.txt
-RUN python3 -m pip install --no-cache-dir -r /tmp/requirements-linux-gpu.txt
+COPY requirements-linux-gpu-cu124.txt /tmp/requirements-linux-gpu-cu124.txt
+RUN python3 -m pip install --upgrade --no-cache-dir pip \
+    && python3 -m pip install --no-cache-dir -r /tmp/requirements-linux-gpu.txt \
+    && python3 -m pip install --no-cache-dir -r /tmp/requirements-linux-gpu-cu124.txt
 
 CMD ["bash"]

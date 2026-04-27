@@ -1,320 +1,736 @@
-# TCC Audio Execution Plan
+# Framework Reproduzivel para LoRA em TTS PT-BR
 
-Base executavel para a parte pratica do TCC em IA generativa de audio.
+Este repositório implementa um framework reproduzível para experimentar `LoRA` sobre `SpeechT5` em síntese de fala em português brasileiro, com avaliação automática por checkpoint, agregação estatística e inspeção qualitativa por app.
 
-O projeto implementa o plano operacional atualizado:
+O objetivo não é apenas "treinar um modelo", mas criar um fluxo repetível para responder perguntas como:
 
-- eixo principal em `SpeechT5`: condicionais `LoRA` com avaliacao por checkpoint;
-- `Whisper` sem ajuste como avaliador de WER;
-- `SpeechBrain ECAPA` para embeddings e similaridade de speaker;
-- `BRSpeech-DF` como evidencia contextual, nao como braco principal.
+- qual configuração de `LoRA` adapta melhor um pequeno conjunto de speakers PT-BR
+- em que ponto do treino cada condição começa a melhorar ou degradar
+- qual tradeoff aparece entre inteligibilidade, similaridade de speaker, custo e latência
+- como comparar checkpoints intermediários de forma justa, e não apenas o checkpoint final
 
-## Estrutura
+O repositório cobre o ciclo completo:
 
-- `configs/speecht5_minimal.yaml`: configuracao oficial do desenho experimental.
-- `data/prompts/ptbr_test_prompts.csv`: 24 prompts fixos em PT-BR, com texto cru e normalizado.
-- `data/manifests/common_voice_curated.csv`: metadados curados apos preprocessamento do Common Voice.
-- `data/manifests/data_manifest.csv`: manifesto consolidado usado nas etapas de treino e validacao.
-- `data/manifests/speaker_selection.csv`: selecao final de speakers usada nas etapas de embeddings e avaliacao.
-- `tcc_audio/`: pacote com validacao, matriz de runs, inferencia, metricas e relatorios.
-- `scripts/`: wrappers de linha de comando.
-- `demo/app.py`: demo Gradio minima para comparar checkpoints LoRA A/B/C.
-- `MANUAL_EXECUCAO.md`: manual completo por ambiente.
-- `tests/smoke_test.py`: checagens locais sem modelos nem datasets.
+- preparação e curadoria do dataset
+- seleção de speakers e montagem de manifesto
+- treino `LoRA`
+- geração de áudio por checkpoint salvo
+- cálculo de métricas automáticas
+- agregação de resultados
+- geração de assets para relatório
+- app Gradio para comparação A/B/C
 
-## Fluxo recomendado
+Para setup e execução operacional:
 
-1. Aceite os termos do dataset no site do Mozilla Data Collective e exporte o token:
+- veja [SETUP_AMBIENTES.md](SETUP_AMBIENTES.md)
+- veja [MANUAL_EXECUCAO.md](MANUAL_EXECUCAO.md)
 
-```bash
-export MOZILLA_DATA_COLLECTIVE_API_KEY="seu_token_aqui"
+## O que este repositório é
+
+Pense neste projeto como um pequeno framework experimental, e não como um único script de treino.
+
+Ele define:
+
+- um contrato de dados para sair do `Common Voice PT` e chegar a um manifesto estável
+- um contrato de execução para transformar configurações YAML em uma `run_matrix`
+- um contrato de avaliação para comparar amostras geradas por `checkpoint`
+- um contrato de artefatos para que treino, métricas, relatórios e demo conversem entre si
+
+Na prática, isso permite:
+
+- trocar condições `LoRA` sem reescrever o pipeline
+- repetir experimentos com o mesmo desenho
+- comparar múltiplos checkpoints de uma mesma condição
+- documentar resultados quantitativos e qualitativos com o mesmo conjunto de arquivos
+
+## Intuição do pipeline
+
+O fluxo ponta a ponta é:
+
+1. `dados brutos`: baixar o `Common Voice PT`
+2. `curadoria`: filtrar o subconjunto `pt-BR`, converter áudio e consolidar metadados
+3. `manifesto`: transformar o subset curado em um contrato de treino/validação
+4. `seleção de speakers`: escolher speakers globais por duração disponível
+5. `embeddings`: materializar embeddings de síntese por speaker
+6. `run matrix`: expandir a configuração YAML em execuções concretas
+7. `ledger de samples`: criar o `samples.csv`, que será enriquecido ao longo do pipeline
+8. `treino LoRA`: treinar cada condição e salvar checkpoints
+9. `geração por checkpoint`: sintetizar áudio para cada checkpoint materializado
+10. `métricas`: rodar `Whisper`, `WER`, `speaker similarity`, `NISQA`, `F0 RMSE`, custo e latência
+11. `agregação`: resumir os resultados por condição analítica
+12. `report/app`: gerar assets e abrir a comparação qualitativa entre checkpoints
+
+A unidade analítica principal do framework é `checkpoint_label=<condicao>@step<k>`.
+
+Isso é importante porque o projeto não assume que "o último checkpoint é o melhor". Cada checkpoint salvo pode ser tratado como um braço comparável do experimento. Essa escolha permite:
+
+- observar a trajetória de aprendizagem
+- detectar overfitting antes do final do treino
+- comparar custo incremental contra ganho real de qualidade
+- fazer comparação mais fina entre configurações `LoRA`
+
+## Arquitetura do repositório
+
+### `configs/`
+
+Entrada:
+
+- arquivos YAML com o desenho do experimento
+
+Saída:
+
+- não produz artefatos diretamente; governa como o resto do pipeline se comporta
+
+Consumido por:
+
+- geração de `run_matrix`
+- treino `LoRA`
+- métricas e resolução de defaults
+
+Arquivo principal:
+
+- `configs/speecht5_minimal.yaml`
+
+### `data/raw/`
+
+Entrada:
+
+- dataset bruto baixado do `Common Voice`
+
+Saída:
+
+- base ainda próxima do formato original
+
+Consumido por:
+
+- preparação de metadados
+- preprocessamento de áudio
+
+### `data/processed/`
+
+Entrada:
+
+- subset curado e reformatado do áudio
+
+Saída:
+
+- WAV mono e metadados já alinhados ao pipeline
+
+Consumido por:
+
+- seleção de speakers
+- treino e referência de síntese
+
+### `data/manifests/`
+
+Entrada:
+
+- metadados preparados e regras do experimento
+
+Saída:
+
+- CSVs que formalizam o contrato de dados do pipeline
+
+Consumido por:
+
+- validação
+- embeddings
+- treino
+- avaliação
+
+Arquivos típicos:
+
+- `common_voice_metadata.csv`
+- `common_voice_curated.csv`
+- `data_manifest.csv`
+- `speaker_selection.csv`
+
+### `artifacts/embeddings/`
+
+Entrada:
+
+- seleção final de speakers
+
+Saída:
+
+- embeddings usados na síntese do `SpeechT5`
+
+Consumido por:
+
+- inicialização do `samples.csv`
+- inferência de TTS
+
+### `artifacts/checkpoints/`
+
+Entrada:
+
+- saídas do treino `LoRA`
+
+Saída:
+
+- diretórios `checkpoint-*` por condição
+
+Consumido por:
+
+- geração de áudio por checkpoint
+- comparação analítica entre estados intermediários do treino
+
+### `artifacts/audio/`
+
+Entrada:
+
+- checkpoints e `samples.csv`
+
+Saída:
+
+- áudios sintetizados
+
+Consumido por:
+
+- `Whisper`
+- métricas de speaker e pitch
+- demo Gradio
+
+### `artifacts/evaluation/`
+
+Entrada:
+
+- `samples.csv` enriquecido ao longo da execução
+
+Saída:
+
+- resumos agregados de métricas e custo
+
+Consumido por:
+
+- `report_assets`
+- app de comparação
+
+### `report_assets/`
+
+Entrada:
+
+- `samples.csv`, `metrics_summary.csv`, `cost_summary.csv`
+
+Saída:
+
+- tabelas Markdown
+- overview
+- gráficos PNG quando `matplotlib` está disponível
+
+Consumido por:
+
+- escrita de relatório
+- apresentação final
+
+### `scripts/`
+
+Entrada:
+
+- comandos de linha de comando
+
+Saída:
+
+- wrappers operacionais do pacote `tcc_audio`
+
+Consumido por:
+
+- setup
+- execução do pipeline
+- rotinas auxiliares
+
+### `tcc_audio/`
+
+Entrada:
+
+- implementação do framework
+
+Saída:
+
+- lógica de negócio reutilizada pelos scripts
+
+Consumido por:
+
+- todos os CLIs do projeto
+
+### `demo/`
+
+Entrada:
+
+- `samples.csv` concluído
+
+Saída:
+
+- interface Gradio para comparar áudios e métricas
+
+Consumido por:
+
+- inspeção qualitativa final
+
+### Documentos operacionais
+
+- [SETUP_AMBIENTES.md](SETUP_AMBIENTES.md): preparação de ambiente
+- [MANUAL_EXECUCAO.md](MANUAL_EXECUCAO.md): execução passo a passo
+
+## Artefatos gerados
+
+### `common_voice_metadata.csv`
+
+Primeiro CSV operacional do pipeline. Representa o subset `pt-BR` extraído do `Common Voice`, ainda próximo da origem, mas já filtrado por locale/variant e alinhado ao projeto.
+
+### `common_voice_curated.csv`
+
+Versão curada após preprocessamento do áudio. Serve de base para a seleção de speakers.
+
+### `data_manifest.csv`
+
+Contrato principal de treino/validação. Cada linha materializa:
+
+- speaker selecionado
+- utterance
+- split
+- caminho de áudio
+- texto alvo
+- texto normalizado para `SpeechT5`
+
+### `speaker_selection.csv`
+
+Resumo da seleção final de speakers, com duração total, áudio de referência e observações para auditoria manual.
+
+### `dataset_inventory.json`
+
+Inventário hierárquico do estado do dataset e da amostragem. É útil para verificar rapidamente o que existe em `raw`, `processed` e no subconjunto de speakers escolhidos.
+
+### `run_matrix.csv`
+
+Expansão do YAML em execuções concretas. Aqui o desenho experimental vira linhas reais combinando:
+
+- condição
+- speaker
+- prompt
+- variante de texto
+
+### `samples.csv`
+
+Ledger incremental do experimento. Este é o arquivo central do framework.
+
+Ele começa com linhas base por run e vai sendo enriquecido com:
+
+- `checkpoint_label`
+- caminhos de áudio
+- timestamps
+- transcrição ASR
+- métricas
+- custo
+- status
+
+Se você quiser entender "o estado atual do experimento", normalmente é aqui que deve olhar primeiro.
+
+### `metrics_summary.csv`
+
+Resumo agregado por condição analítica e `text_variant`, com médias, medianas, desvio, intervalos de confiança e testes pareados quando aplicáveis.
+
+### `cost_summary.csv`
+
+Resumo agregado de custo, horas de GPU e latência média de inferência.
+
+### `report_assets/`
+
+Pacote final para comunicação de resultados:
+
+- tabelas Markdown
+- overview
+- gráficos por métrica
+- gráficos por speaker
+
+## Intuição do pipeline canônico
+
+### 1. Baixar o `Common Voice PT`
+
+O pipeline começa com o dataset bruto, sem assumir que a estrutura local já está pronta. Isso reduz ambiguidade e torna o experimento reproduzível desde a origem dos dados.
+
+### 2. Filtrar `pt-BR` e consolidar metadados
+
+O projeto não usa o dataset "como veio". Primeiro ele seleciona o locale `pt` e a variant `pt-BR`, consolidando colunas como `gender`, `locale`, `variant`, texto e duração.
+
+Essa etapa é importante porque o subset linguístico é parte do desenho experimental, não um detalhe operacional.
+
+### 3. Preprocessar áudio
+
+O áudio é convertido para um formato canônico do projeto, com organização estável em disco e cálculo explícito de duração. Isso reduz variabilidade entre etapas e simplifica a seleção e o treino.
+
+### 4. Selecionar speakers e gerar o manifesto
+
+O framework ranqueia speakers globalmente por duração disponível e seleciona os primeiros `speaker_target_count`. Para cada speaker escolhido:
+
+- o áudio é ordenado por duração
+- clips são acumulados até o teto `minutes_per_speaker`
+- um subconjunto pequeno vira `val`
+- o restante vira `train`
+- o clip de referência é o primeiro selecionado, isto é, o de maior duração dentro do subconjunto escolhido
+
+Essa política favorece speakers com mais material útil e mantém um split simples e reprodutível.
+
+### 5. Extrair embeddings de síntese
+
+Os embeddings extraídos aqui não são para avaliação. Eles são os vetores consumidos pelo `SpeechT5` no momento da síntese.
+
+Por isso o `speaker_embedding_path` no `samples.csv` representa o embedding de síntese, não o embedding usado na métrica de similaridade.
+
+### 6. Expandir o YAML em `run_matrix`
+
+Antes de treinar qualquer coisa, o framework materializa todas as combinações planejadas entre:
+
+- condição
+- speaker
+- prompt
+- variante de texto
+
+Isso torna o desenho explícito e auditável. Você consegue inspecionar o experimento antes de gastar GPU.
+
+### 7. Inicializar o ledger de samples
+
+`samples.csv` nasce antes da inferência para funcionar como ledger do experimento. O pipeline não trata samples como efeitos colaterais dispersos; ele os trata como entidades rastreáveis.
+
+### 8. Treinar LoRA e salvar checkpoints
+
+Cada condição `LoRA` é treinada conforme o YAML. O treino salva checkpoints em passos definidos, e cada checkpoint passa a ser um candidato real de avaliação.
+
+### 9. Materializar áudio por checkpoint
+
+Quando um checkpoint é salvo, o pipeline gera áudio com ele e preenche novas linhas no ledger. Isso transforma o histórico do treino em um conjunto comparável de saídas.
+
+### 10. Rodar ASR e métricas
+
+Depois da síntese:
+
+- `Whisper` gera transcrições
+- `WER` mede inteligibilidade
+- `speaker_similarity` mede preservação de identidade
+- `NISQA` aproxima qualidade perceptual
+- `F0 RMSE` mede desvio de pitch
+- `RTF`, custo e horas de GPU completam a visão operacional
+
+### 11. Agregar e comparar
+
+O agregador trabalha sobre `analysis_condition`, que prioriza `checkpoint_label` quando ele existe. Na prática, isso significa que a comparação principal não é apenas entre "condições", mas entre checkpoints concretos.
+
+### 12. Gerar relatório e abrir a demo
+
+O fim do pipeline produz:
+
+- resumos agregados para análise quantitativa
+- assets de relatório para apresentação
+- uma interface para ouvir e comparar saídas
+
+## Normalizações e filtros
+
+### `raw_text` versus `normalized_text`
+
+Os prompts carregam as duas visões:
+
+- `raw_text`: texto original, mais próximo da formulação humana
+- `normalized_text`: texto ajustado para ser mais estável para o `SpeechT5`
+
+O framework opera com `text_variant`, então a variação entre texto cru e normalizado faz parte do desenho experimental.
+
+### Auditoria de texto para `SpeechT5`
+
+O manifesto pode carregar `target_text_speecht5`, e a validação confere se a forma normalizada ainda produz `<unk>` no tokenizer do modelo. Isso evita treinar e avaliar entradas linguisticamente mal representadas pelo modelo base.
+
+### Filtros de dataset
+
+O pipeline parte do `Common Voice PT`, mas o experimento usa explicitamente o recorte:
+
+- `locale=pt`
+- `variant=pt-BR`
+
+Além disso, ele descarta durações inválidas e exige caminhos de áudio consistentes quando a checagem de arquivos é ativada.
+
+### Restrição de duração
+
+Na preparação de dados e no setup experimental aparecem duas noções de duração:
+
+- duração real de cada clip
+- teto de `minutes_per_speaker` por speaker selecionado
+
+O objetivo é manter um orçamento de adaptação comparável entre speakers sem exigir exatamente o mesmo número de clips por pessoa.
+
+## Seleção de speakers e regras de amostragem
+
+### `speaker_target_count`
+
+Define quantos speakers entram no experimento. No config oficial, esse valor é `4`.
+
+### `minutes_per_speaker`
+
+Funciona como teto de áudio acumulado por speaker. Ele não exige que um speaker tenha esse total disponível; speakers com menos minutos continuam elegíveis.
+
+### Seleção global
+
+A seleção atual é global por duração total disponível. O framework não balanceia mais por gênero nessa etapa. Isso simplifica a política de amostragem e torna explícita a prioridade por cobertura útil de áudio.
+
+### Splits
+
+Depois da escolha dos clips:
+
+- uma fração pequena vai para `val`
+- o restante vai para `train`
+
+A função interna garante que speakers selecionados preservem ao menos um clip de treino.
+
+## Como configurar LoRA
+
+O coração do experimento está em `configs/speecht5_minimal.yaml`, especialmente no bloco `conditions:`.
+
+Cada condição responde à pergunta: "como quero adaptar o modelo e como quero avaliar essa adaptação?"
+
+Campos importantes:
+
+- `id`: identificador estável da condição
+- `label`: nome legível para análise e relatório
+- `train_strategy`: indica que a condição usa `lora`
+- `uses_speaker_embeddings`: sinaliza que a síntese consome embeddings de speaker
+- `normalization_modes`: define se a run usa `raw`, `normalized` ou ambos
+- `lora`: hiperparâmetros do adaptador
+- `training`: hiperparâmetros do processo de treino
+
+### Bloco `lora`
+
+Campos principais:
+
+- `r`: rank do adaptador
+- `lora_alpha`: escala do adaptador
+- `lora_dropout`: regularização
+- `target_modules`: quais projeções do modelo serão adaptadas
+- `bias`: política de bias
+
+Em termos práticos:
+
+- ranks menores tendem a ser mais conservadores
+- ranks maiores aumentam capacidade, custo e risco de overfit
+
+### Bloco `training`
+
+Campos principais:
+
+- `scope`
+- `max_steps`
+- `learning_rate`
+- `warmup_ratio`
+- `per_device_train_batch_size`
+- `gradient_accumulation_steps`
+- `effective_batch_size`
+- `fp16`
+- `gradient_checkpointing`
+- `save_steps`
+- `eval_steps`
+
+### `scope: per_speaker` versus `scope: unique`
+
+`per_speaker`:
+
+- treina uma unidade por speaker
+- tende a focar adaptação mais localizada
+- facilita leitura de comportamento individual
+
+`unique`:
+
+- treina uma unidade única agregando os dados previstos para a condição
+- é útil quando a hipótese é aprender um comportamento mais compartilhado
+
+## Dois exemplos de configuração LoRA
+
+Os exemplos abaixo são didáticos. O perfil oficial do repositório continua sendo o que está no YAML versionado.
+
+### Exemplo conservador
+
+Este perfil é próximo da configuração oficial atual. A ideia é adaptar com parcimônia, manter batch efetivo modesto e preservar estabilidade em GPUs como a `RTX 4090 24 GB`.
+
+```yaml
+- id: speecht5_lora_conservative_example
+  label: SpeechT5 LoRA Conservative Example
+  train_strategy: lora
+  uses_speaker_embeddings: true
+  normalization_modes: [normalized]
+  lora:
+    r: 16
+    lora_alpha: 32
+    lora_dropout: 0.05
+    bias: none
+    target_modules: [q_proj, k_proj, v_proj, out_proj]
+  training:
+    scope: per_speaker
+    max_steps: 1500
+    learning_rate: 3.0e-5
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 2
+    effective_batch_size: 4
+    per_device_eval_batch_size: 2
+    fp16: true
+    gradient_checkpointing: true
+    save_steps: 500
+    eval_steps: 500
 ```
 
-2. Baixe e organize o `Common Voice PT` no layout canonico do repo:
+Quando usar:
 
-```bash
-python3 scripts/download_common_voice_pt.py \
-  --out-dir data/raw/common_voice_pt
+- primeiro experimento reprodutível
+- budget de VRAM controlado
+- maior preocupação com estabilidade do que com agressividade de adaptação
+
+### Exemplo agressivo
+
+Este perfil aumenta capacidade e pressão de otimização. Deve ser lido como ponto de partida experimental, com risco maior de OOM, instabilidade e overfit.
+
+```yaml
+- id: speecht5_lora_aggressive_example
+  label: SpeechT5 LoRA Aggressive Example
+  train_strategy: lora
+  uses_speaker_embeddings: true
+  normalization_modes: [normalized]
+  lora:
+    r: 32
+    lora_alpha: 64
+    lora_dropout: 0.05
+    bias: none
+    target_modules: [q_proj, k_proj, v_proj, out_proj]
+  training:
+    scope: unique
+    max_steps: 2500
+    learning_rate: 5.0e-5
+    per_device_train_batch_size: 4
+    gradient_accumulation_steps: 2
+    effective_batch_size: 8
+    per_device_eval_batch_size: 4
+    fp16: true
+    gradient_checkpointing: false
+    save_steps: 500
+    eval_steps: 500
 ```
 
-3. Prepare os metadados do subconjunto `pt-BR`:
-
-```bash
-python3 scripts/prepare_common_voice_metadata.py \
-  --tsv data/raw/common_voice_pt/validated.tsv \
-  --clips-dir data/raw/common_voice_pt/clips \
-  --locale pt \
-  --variant pt-BR \
-  --out data/manifests/common_voice_metadata.csv
-```
-
-4. Converta o audio para WAV mono e calcule duracoes:
-
-```bash
-python3 scripts/preprocess_audio_dataset.py \
-  --metadata data/manifests/common_voice_metadata.csv \
-  --out-dir data/processed/common_voice_pt \
-  --out-metadata data/manifests/common_voice_curated.csv
-```
-
-5. Gere o manifesto real a partir do subset curado de Common Voice. A selecao agora e global, limitada por `speaker_target_count`, e nao usa mais balanceamento por genero.
-
-```bash
-python3 scripts/select_speakers.py \
-  --metadata data/manifests/common_voice_curated.csv \
-  --speaker-target-count 4 \
-  --manifest-out data/manifests/data_manifest.csv \
-  --speaker-selection-out data/manifests/speaker_selection.csv
-```
-
-`minutes_per_speaker` continua definindo o teto de audio amostrado por speaker, mas speakers com menos minutos continuam elegiveis.
-
-6. Gere um inventario do dataset para inspecionar `data/raw`, `data/processed` e o resumo dos speakers selecionados:
-
-```bash
-python3 scripts/log_dataset_inventory.py \
-  --config configs/speecht5_minimal.yaml \
-  --json-out artifacts/dataset_inventory.json
-```
-
-O comando imprime um relatorio no console e salva um JSON com os blocos `raw`, `processed`, `selected_speakers`, `sampling` e `paths`.
-
-7. Valide o manifesto:
-
-```bash
-python3 scripts/validate_manifest.py \
-  --manifest data/manifests/data_manifest.csv \
-  --prompts data/prompts/ptbr_test_prompts.csv
-```
-
-8. Gere embeddings de speaker:
-
-```bash
-python3 scripts/extract_speaker_embeddings.py \
-  --config configs/speecht5_minimal.yaml \
-  --speaker-selection data/manifests/speaker_selection.csv \
-  --out-index artifacts/embeddings/speaker_embeddings.csv \
-  --out-dir artifacts/embeddings
-```
-
-Esse passo prepara os embeddings consumidos pela sintese do SpeechT5. O `speaker_embedding_path` do `samples.csv` aponta para esses embeddings de sintese.
-
-9. Gere a matriz de execucao:
-
-```bash
-python3 scripts/generate_run_matrix.py \
-  --config configs/speecht5_minimal.yaml \
-  --out artifacts/run_matrix.csv
-```
-
-10. Inicialize o ledger de amostras:
-
-```bash
-python3 scripts/init_samples.py \
-  --run-matrix artifacts/run_matrix.csv \
-  --speaker-selection data/manifests/speaker_selection.csv \
-  --speaker-embeddings artifacts/embeddings/speaker_embeddings.csv \
-  --out artifacts/evaluation/samples.csv
-```
-
-11. Rode o pipeline LoRA:
-
-```bash
-python3 scripts/run_speecht5_lora.py \
-  --config configs/speecht5_minimal.yaml \
-  --manifest data/manifests/data_manifest.csv \
-  --samples artifacts/evaluation/samples.csv \
-  --checkpoint-dir artifacts/checkpoints/lora \
-  --gpu-hourly-rate 0.0
-```
-
-Sem `--condition`, todas as condicionais LoRA do YAML sao treinadas sequencialmente. Para rodar apenas um subconjunto:
-
-```bash
-python3 scripts/run_speecht5_lora.py \
-  --config configs/speecht5_minimal.yaml \
-  --manifest data/manifests/data_manifest.csv \
-  --samples artifacts/evaluation/samples.csv \
-  --checkpoint-dir artifacts/checkpoints/lora \
-  --condition speecht5_lora_conservative \
-  --condition speecht5_lora_unique \
-  --gpu-hourly-rate 0.0
-```
+Tradeoffs esperados:
 
-Cada checkpoint salvo vira um braco independente de avaliacao e materializa linhas novas no `samples.csv` com `checkpoint_label=<condicao>@step<k>`.
+- maior capacidade de adaptação
+- maior risco de overfit em poucos minutos por speaker
+- maior pressão de VRAM
+- mais chance de ganhos rápidos seguidos de degradação em checkpoints tardios
 
-Se for necessario preencher custos de treino depois da execucao, o backfill usa `total_train_gpu_hours` quando a coluna estiver salva no `samples.csv` e, na falta dela, cai para `run_started_at` e `run_finished_at`:
+## Comparação entre checkpoints
 
-```bash
-python3 scripts/backfill_training_costs.py \
-  --samples artifacts/evaluation/samples.csv \
-  --gpu-hourly-rate 0.0 \
-  --summary-out artifacts/evaluation/manual_training_costs_summary.csv
-```
+Este é um dos pontos mais importantes do framework.
 
-Para limpar apenas os rastros materializados de treino de uma ou mais condicionais LoRA, use `clear_speecht5_training_results.py`. O script pede confirmacao por padrao, aceita `--bypass` para automacao e, quando chamado diretamente, so exige `--condition` porque os demais caminhos usam defaults do projeto:
+Cada checkpoint salvo:
 
-```bash
-python3 scripts/clear_speecht5_training_results.py \
-  --condition speecht5_lora_unique
-```
+- gera novas amostras
+- recebe métricas com o mesmo conjunto de speakers e prompts
+- entra nas agregações com um `checkpoint_label` explícito
 
-Para limpar varias condicionais especificas:
+Isso é melhor do que avaliar apenas o último checkpoint porque permite observar:
 
-```bash
-python3 scripts/clear_speecht5_training_results.py \
-  --condition speecht5_lora_conservative \
-  --condition speecht5_lora_unique
-```
+- onde uma condição realmente começa a melhorar
+- se ganhos iniciais se sustentam
+- se um checkpoint intermediário já é suficiente
+- se o custo adicional de treinar mais compensa
 
-Para remover todos os treinos LoRA materializados:
+No agregador:
 
-```bash
-python3 scripts/clear_speecht5_training_results.py \
-  --condition all
-```
+- `analysis_condition` usa `checkpoint_label` quando disponível
+- comparações pareadas usam `Wilcoxon`
+- intervalos de confiança são estimados por bootstrap
 
-Esse cleanup remove:
+Na prática, você consegue comparar:
 
-- checkpoints em `artifacts/checkpoints/lora/<condition>/`
-- audios materializados em `artifacts/audio/<condition>/`
-- linhas materializadas da condicional no `samples.csv`
-- agregados globais em `artifacts/evaluation/`
-- o diretorio `report_assets/`
+- `condicao A @ step500` versus `condicao A @ step1000`
+- `condicao A @ step500` versus `condicao B @ step500`
+- efeitos por speaker
+- efeitos por `text_variant`
 
-Se a intencao for remover a condicional inteira do experimento, incluindo linhas base do `samples.csv` e a entrada correspondente no YAML, use `remove_speecht5_condition.py`. Esse script tambem pede confirmacao por padrao e aceita `--bypass`:
+## Validações, métricas, reports e app
 
-```bash
-python3 scripts/remove_speecht5_condition.py \
-  --condition speecht5_lora_unique
-```
+### Validações
 
-Esse fluxo executa o cleanup acima, remove as linhas base da condicional no `samples.csv`, remove a condicional do bloco `conditions:` do config e invalida `deliverables.run_matrix` quando o arquivo existir.
+Antes do treino, o framework valida:
 
-11. Rode Whisper e calcule WER para as amostras materializadas por checkpoint:
+- colunas obrigatórias dos manifests
+- valores válidos de `split` e `text_variant`
+- duração positiva
+- duplicatas por `speaker_id + utterance_id + split`
+- coerência de prompts
+- compatibilidade de texto com o tokenizer do `SpeechT5`
 
-```bash
-python3 scripts/run_whisper_batch.py \
-  --samples artifacts/evaluation/samples.csv \
-  --out artifacts/evaluation/samples.csv
-```
+Esse passo existe para falhar cedo e evitar gastar GPU com entradas inconsistentes.
 
-```bash
-python3 scripts/compute_wer.py \
-  --samples artifacts/evaluation/samples.csv \
-  --out artifacts/evaluation/samples.csv
-```
+### Métricas
 
-12. Calcule as demais metricas:
+#### `WER`
 
-```bash
-python3 scripts/compute_speaker_similarity.py \
-  --config configs/speecht5_minimal.yaml \
-  --samples artifacts/evaluation/samples.csv \
-  --out artifacts/evaluation/samples.csv
-```
+Responde: "o que foi sintetizado é inteligível o suficiente para ser recuperado por ASR?"
 
-Esse passo usa o modelo de avaliacao configurado em `evaluation.speaker_similarity_model` e nao consome `speaker_embedding_path`.
+#### `speaker_similarity`
 
-```bash
-python3 scripts/compute_nisqa.py \
-  --samples artifacts/evaluation/samples.csv \
-  --out artifacts/evaluation/samples.csv
-```
+Responde: "a voz sintetizada ainda parece pertencer ao speaker pretendido?"
 
-O NISQA nao faz parte deste repositorio. Antes desse passo, baixe o repositorio oficial localmente:
+#### `NISQA`
 
-```bash
-git clone https://github.com/gabrielmittag/NISQA.git ./NISQA
-```
+Responde: "qual a qualidade perceptual geral aproximada do áudio?"
 
-Neste projeto, o checkout canonico fica em `./NISQA`. Os bootstraps oficiais ja fazem esse clone e validam o ambiente. Antes de rodar a metrica fora do bootstrap, confirme que o checkout contem:
+#### `F0 RMSE`
 
-- `./NISQA/.git`
-- `./NISQA/nisqa/NISQA_model.py`
-- `./NISQA/weights/nisqa_tts.tar`
+Responde: "o comportamento melódico e de pitch se afastou muito da referência?"
 
-Se o pacote NISQA nao estiver instalado no ambiente ativo, aponte esse checkout local no comando:
+#### `RTF`
 
-```bash
-python3 scripts/compute_nisqa.py \
-  --samples artifacts/evaluation/samples.csv \
-  --out artifacts/evaluation/samples.csv \
-  --nisqa-path "$(pwd)/NISQA"
-```
+Responde: "quão cara é a inferência em relação à duração do próprio áudio?"
 
-Ou exporte:
+#### `train_gpu_hours`, `inference_seconds`, `cost_usd`
 
-```bash
-export NISQA_PATH="$(pwd)/NISQA"
-```
+Respondem: "quanto custou treinar e gerar esse braço do experimento?"
 
-```bash
-python3 scripts/compute_f0_rmse.py \
-  --samples artifacts/evaluation/samples.csv \
-  --out artifacts/evaluation/samples.csv
-```
+### Reports
 
-11. Depois de preencher as metricas e marcar linhas concluidas com `status=ok`, agregue resultados:
+O agregador produz:
 
-```bash
-python3 scripts/aggregate_metrics.py \
-  --samples artifacts/evaluation/samples.csv \
-  --out-dir artifacts/evaluation
-```
+- `metrics_summary.csv`
+- `cost_summary.csv`
+- `metrics_by_speaker.csv`
+- `cost_by_speaker.csv`
 
-12. Gere assets finais:
+Depois, `report_assets` transforma esses outputs em:
 
-```bash
-python3 scripts/make_report_assets.py \
-  --samples artifacts/evaluation/samples.csv \
-  --metrics artifacts/evaluation/metrics_summary.csv \
-  --costs artifacts/evaluation/cost_summary.csv \
-  --out-dir report_assets
-```
+- tabelas Markdown
+- overview do experimento
+- gráficos por métrica
+- gráficos por speaker
 
-13. Rode a demo, se `gradio` estiver instalado:
+### App
 
-```bash
-python3 demo/app.py --samples artifacts/evaluation/samples.csv
-```
+O app Gradio é uma camada de inspeção qualitativa, não uma substituição das métricas.
 
-## Ambientes
+Ele permite:
 
-- `MANUAL_EXECUCAO.md`: runbooks completos para `Mac M2 host-native com MPS`, `Linux local com NVIDIA + Docker` e `RunPod com NVIDIA + Docker`.
-- `requirements-macos-mps.txt`: dependencia para `macOS Apple Silicon` com `PyTorch MPS`.
-- `requirements-linux-gpu.txt`: dependencia para `Linux/RunPod` com `CUDA`.
-- `docker/docker-compose.nvidia.yml`: compose oficial para `Linux NVIDIA` e `RunPod`.
+- escolher `prompt`
+- escolher `speaker`
+- comparar três condições analíticas em paralelo
+- ouvir os três áudios
+- visualizar métricas resumidas por amostra
 
-Regra operacional:
+Isso é particularmente útil quando duas condições parecem próximas numericamente, mas soam diferentes.
 
-- `Mac = GPU no host via MPS, sem Docker`
-- `Docker = apenas NVIDIA Linux/RunPod`
-- `RunPod + Docker` segue suportado e e o ambiente oficial
+## Como começar
 
-## Contrato de artefatos
+Se você acabou de baixar o repositório, a ordem recomendada é:
 
-O manifesto de dados deve conter, no minimo:
+1. leia este `README.md` para entender o framework
+2. prepare o ambiente em [SETUP_AMBIENTES.md](SETUP_AMBIENTES.md)
+3. execute o pipeline em [MANUAL_EXECUCAO.md](MANUAL_EXECUCAO.md)
 
-```text
-speaker_id,utterance_id,split,duration_s,source,license,audio_path,reference_audio,target_text,text_variant
-```
+Se a sua meta for apenas testar novas condições `LoRA`, pense no ciclo abaixo:
 
-O arquivo `samples.csv` de avaliacao deve conter, no minimo:
+1. editar o bloco `conditions:` do YAML
+2. regenerar `run_matrix.csv`
+3. inicializar ou reutilizar `samples.csv`
+4. treinar e materializar checkpoints
+5. comparar checkpoints nas métricas e no app
 
-```text
-sample_id,run_id,condition,speaker_id,prompt_id,text_variant,target_text,audio_path,reference_audio_path,speaker_embedding_path,model_name,checkpoint_label,checkpoint_step,checkpoint_path,checkpoint_run_ts,training_scope,training_unit,run_started_at,run_finished_at,failure_reason,wer,speaker_similarity,nisqa,f0_rmse,rtf,train_gpu_hours,inference_seconds,cost_usd,status,lora_gate_status
-```
-
-No `samples.csv`, `speaker_embedding_path` representa apenas o embedding de sintese usado pelo TTS.
-`condition` preserva a condicional base do YAML, enquanto `checkpoint_label` e o rotulo analitico principal usado nas comparacoes e agregacoes.
-
-Campos extras sao permitidos. Use `asr_text` para armazenar a transcricao do Whisper antes de rodar `scripts/compute_wer.py`.
-Quando disponivel, `total_train_gpu_hours` armazena o tempo total de treino por unidade de treino materializada e e usado pelo backfill de custos.
-
-## Checkpoints LoRA
-
-- Cada condicional LoRA deve declarar subblocos separados `lora` e `training`.
-- `training.scope` aceita `per_speaker` e `unique`.
-- `save_total_limit` pode aparecer no YAML como metadado de configuracao, mas o pipeline ignora pruning para preservar todos os checkpoints avaliados.
-- As agregacoes principais saem por `checkpoint_label`, e o diretório de avaliacao tambem recebe visoes por speaker.
+Esse é o valor principal do repositório: oferecer um caminho reproduzível para transformar hipóteses de adaptação `LoRA` em experimentos comparáveis, auditáveis e comunicáveis.

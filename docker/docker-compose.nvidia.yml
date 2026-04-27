@@ -12,6 +12,8 @@ services:
       - PYTHONPATH=/workspace
       - HF_HOME=/root/.cache/huggingface
       - TORCH_HOME=/root/.cache/torch
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     deploy:
       resources:
         reservations:
