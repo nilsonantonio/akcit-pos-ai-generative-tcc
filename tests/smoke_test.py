@@ -1640,12 +1640,13 @@ def test_extract_speaker_embeddings_uses_configured_tts_model() -> None:
             [{"speaker_id": "speaker_01", "reference_audio": str(reference_audio)}]
         ).to_csv(selection_path, index=False)
 
-        calls: dict[str, str] = {}
+        calls: dict[str, object] = {}
 
         class FakeEncoderClassifier:
             @classmethod
-            def from_hparams(cls, source: str):
+            def from_hparams(cls, source: str, run_opts: dict[str, str] | None = None):
                 calls["source"] = source
+                calls["run_opts"] = run_opts
                 return object()
 
         with patch("tcc_audio.speaker_embeddings.load_encoder_classifier", return_value=FakeEncoderClassifier):
@@ -1684,12 +1685,13 @@ def test_extract_speaker_embeddings_override_wins_over_config() -> None:
             [{"speaker_id": "speaker_01", "reference_audio": str(reference_audio)}]
         ).to_csv(selection_path, index=False)
 
-        calls: dict[str, str] = {}
+        calls: dict[str, object] = {}
 
         class FakeEncoderClassifier:
             @classmethod
-            def from_hparams(cls, source: str):
+            def from_hparams(cls, source: str, run_opts: dict[str, str] | None = None):
                 calls["source"] = source
+                calls["run_opts"] = run_opts
                 return object()
 
         with patch("tcc_audio.speaker_embeddings.load_encoder_classifier", return_value=FakeEncoderClassifier):
@@ -1707,6 +1709,8 @@ def test_extract_speaker_embeddings_override_wins_over_config() -> None:
                 )
 
         assert calls["source"] == "override/model"
+        assert calls["run_opts"] == {"device": "cpu"}
+        assert calls["run_opts"] == {"device": "cpu"}
         assert int(frame.iloc[0]["embedding_dim"]) == 192
 
 
@@ -1755,12 +1759,13 @@ def test_compute_speaker_similarity_uses_configured_eval_model() -> None:
             ]
         ).to_csv(samples_path, index=False)
 
-        calls: dict[str, str] = {}
+        calls: dict[str, object] = {}
 
         class FakeEncoderClassifier:
             @classmethod
-            def from_hparams(cls, source: str):
+            def from_hparams(cls, source: str, run_opts: dict[str, str] | None = None):
                 calls["source"] = source
+                calls["run_opts"] = run_opts
                 return object()
 
         with patch("tcc_audio.audio_metrics.load_encoder_classifier", return_value=FakeEncoderClassifier):
@@ -1771,6 +1776,7 @@ def test_compute_speaker_similarity_uses_configured_eval_model() -> None:
                 updated = compute_speaker_similarity(samples_path, samples_path, config_path=config_path)
 
         assert calls["source"] == "speechbrain/spkrec-ecapa-voxceleb"
+        assert calls["run_opts"] == {"device": "cpu"}
         assert float(updated.loc[updated["sample_id"].eq("s1"), "speaker_similarity"].iloc[0]) == 1.0
 
 

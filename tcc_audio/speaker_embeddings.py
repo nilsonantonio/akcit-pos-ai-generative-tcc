@@ -21,7 +21,11 @@ from tcc_audio.cli_defaults import (
     resolve_data_path,
 )
 from tcc_audio.io import ensure_parent_dir, read_csv
-from tcc_audio.speechbrain_compat import encode_audio_path, load_encoder_classifier
+from tcc_audio.speechbrain_compat import (
+    encode_audio_path,
+    load_encoder_classifier,
+    resolve_speechbrain_run_opts,
+)
 
 
 def extract_speaker_embeddings(
@@ -42,7 +46,10 @@ def extract_speaker_embeddings(
     if missing:
         raise ValueError(f"Missing speaker selection columns: {', '.join(sorted(missing))}")
 
-    classifier = EncoderClassifier.from_hparams(source=resolved_model_name)
+    classifier = EncoderClassifier.from_hparams(
+        source=resolved_model_name,
+        run_opts=resolve_speechbrain_run_opts(),
+    )
     rows: list[dict[str, object]] = []
     out_root = Path(out_dir)
     out_root.mkdir(parents=True, exist_ok=True)

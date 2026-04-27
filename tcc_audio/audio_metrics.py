@@ -14,7 +14,11 @@ import pandas as pd
 
 from tcc_audio.config import load_experiment_config, resolve_speaker_similarity_model
 from tcc_audio.runtime import load_samples, refresh_sample_status, save_samples, stringify_csv_value
-from tcc_audio.speechbrain_compat import encode_audio_path, load_encoder_classifier
+from tcc_audio.speechbrain_compat import (
+    encode_audio_path,
+    load_encoder_classifier,
+    resolve_speechbrain_run_opts,
+)
 
 
 def _load_librosa():
@@ -34,7 +38,10 @@ def compute_speaker_similarity(
     config = load_experiment_config(config_path)
     resolved_model_name = model_name or resolve_speaker_similarity_model(config)
     EncoderClassifier = load_encoder_classifier()
-    classifier = EncoderClassifier.from_hparams(source=resolved_model_name)
+    classifier = EncoderClassifier.from_hparams(
+        source=resolved_model_name,
+        run_opts=resolve_speechbrain_run_opts(),
+    )
     samples = load_samples(samples_path)
     subset = samples[samples["audio_path"].astype(str).str.strip().ne("")]
 
