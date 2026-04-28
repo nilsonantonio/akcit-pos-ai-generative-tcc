@@ -7,6 +7,16 @@ from typing import Any
 
 import pandas as pd
 
+from tcc_audio.processed_audio_quality import (
+    DEFAULT_PEAK_MIN,
+    DEFAULT_RMS_MAX,
+    DEFAULT_RMS_MIN,
+    DEFAULT_SILENCE_RATIO_MAX,
+    AudioQualityThresholds,
+    QUALITY_METRIC_COLUMNS,
+    require_audio_quality_columns,
+)
+
 DEFAULT_MIN_CLIPS_PER_SPEAKER = 20
 DEFAULT_MAX_CLIPS_PER_SPEAKER = 120
 DEFAULT_MIN_DURATION_PER_SPEAKER_S = 60.0
@@ -16,6 +26,8 @@ DEFAULT_MAX_AUDIO_DURATION_S = 8.0
 
 @dataclass
 class TrainingSliceResult:
+    prepared_rows: pd.DataFrame
+    quality_filtered: pd.DataFrame
     clip_filtered: pd.DataFrame
     final_rows: pd.DataFrame
     speaker_stats_before_cap: pd.DataFrame
@@ -23,6 +35,11 @@ class TrainingSliceResult:
     warnings: list[str]
     invalid_duration_rows: int
     negative_duration_rows: int
+    invalid_quality_rows: int
+    excluded_by_low_rms: int
+    excluded_by_high_rms: int
+    excluded_by_low_peak: int
+    excluded_by_high_silence_ratio: int
     capped_speakers: int
     candidate_speakers: int
     eligible_speakers: int
@@ -48,6 +65,7 @@ def _validate_filter_bounds(
     min_clips_per_speaker: int,
     max_clips_per_speaker: int,
     min_duration_per_speaker_s: float,
+    quality_thresholds: AudioQualityThresholds,
 ) -> None:
     if min_audio_duration_s < 0:
         raise ValueError("min_audio_duration_s must be >= 0")
@@ -63,6 +81,7 @@ def _validate_filter_bounds(
         raise ValueError("min_clips_per_speaker must be <= max_clips_per_speaker")
     if min_duration_per_speaker_s < 0:
         raise ValueError("min_duration_per_speaker_s must be >= 0")
+    quality_thresholds.validate()
 
 
 def _require_columns(metadata: pd.DataFrame, required: list[str]) -> None:
@@ -71,7 +90,7 @@ def _require_columns(metadata: pd.DataFrame, required: list[str]) -> None:
         raise ValueError(f"Missing dataset filter input columns: {', '.join(missing)}")
 
 
-def _prepare_metadata(metadata: pd.DataFrame) -> tuple[pd.DataFrame, list[str], int, int]:
+def _prepare_metadata(metadata: pd.DataFrame) -> tuple[pd.DataFrame, list[str], int, int, int]:
     prepared = metadata.copy()
     warnings: list[str] = []
     prepared["_row_order"] = range(len(prepared))
@@ -85,14 +104,22 @@ def _prepare_metadata(metadata: pd.DataFrame) -> tuple[pd.DataFrame, list[str], 
     if negative_duration_rows:
         warnings.append(f"Discarded {negative_duration_rows} rows with negative duration_s.")
 
+    require_audio_quality_columns(prepared)
+    for column in QUALITY_METRIC_COLUMNS:
+        prepared[column] = pd.to_numeric(prepared[column], errors="coerce")
+    invalid_quality_rows = int(prepared[QUALITY_METRIC_COLUMNS].isna().any(axis=1).sum())
+    if invalid_quality_rows:
+        warnings.append(f"Discarded {invalid_quality_rows} rows with invalid audio quality metrics.")
+
     prepared = prepared.dropna(subset=["duration_s"])
     prepared = prepared[prepared["duration_s"] >= 0].copy()
+    prepared = prepared.dropna(subset=QUALITY_METRIC_COLUMNS)
 
     for column in ["source_speaker_id", "gender", "locale", "variant"]:
         if column in prepared.columns:
             prepared[column] = _normalize_text_column(prepared, column)
 
-    return prepared, warnings, invalid_duration_rows, negative_duration_rows
+    return prepared, warnings, invalid_duration_rows, negative_duration_rows, invalid_quality_rows
 
 
 def _speaker_stats(frame: pd.DataFrame) -> pd.DataFrame:
@@ -128,19 +155,37 @@ def apply_training_slice_filters(
     min_clips_per_speaker: int = DEFAULT_MIN_CLIPS_PER_SPEAKER,
     max_clips_per_speaker: int = DEFAULT_MAX_CLIPS_PER_SPEAKER,
     min_duration_per_speaker_s: float = DEFAULT_MIN_DURATION_PER_SPEAKER_S,
+    rms_min: float = DEFAULT_RMS_MIN,
+    rms_max: float = DEFAULT_RMS_MAX,
+    peak_min: float = DEFAULT_PEAK_MIN,
+    silence_ratio_max: float = DEFAULT_SILENCE_RATIO_MAX,
 ) -> TrainingSliceResult:
     _require_columns(metadata, ["source_speaker_id", "duration_s"])
+    quality_thresholds = AudioQualityThresholds(
+        rms_min=rms_min,
+        rms_max=rms_max,
+        peak_min=peak_min,
+        silence_ratio_max=silence_ratio_max,
+    )
     _validate_filter_bounds(
         min_audio_duration_s=min_audio_duration_s,
         max_audio_duration_s=max_audio_duration_s,
         min_clips_per_speaker=min_clips_per_speaker,
         max_clips_per_speaker=max_clips_per_speaker,
         min_duration_per_speaker_s=min_duration_per_speaker_s,
+        quality_thresholds=quality_thresholds,
     )
 
-    prepared, warnings, invalid_duration_rows, negative_duration_rows = _prepare_metadata(metadata)
-    clip_filtered = prepared[
-        prepared["duration_s"].ge(min_audio_duration_s) & prepared["duration_s"].le(max_audio_duration_s)
+    prepared, warnings, invalid_duration_rows, negative_duration_rows, invalid_quality_rows = _prepare_metadata(metadata)
+    low_rms_mask = prepared["audio_rms"].lt(quality_thresholds.rms_min)
+    high_rms_mask = prepared["audio_rms"].gt(quality_thresholds.rms_max)
+    low_peak_mask = prepared["audio_peak"].lt(quality_thresholds.peak_min)
+    high_silence_mask = prepared["audio_silence_ratio"].gt(quality_thresholds.silence_ratio_max)
+    quality_mask = ~(low_rms_mask | high_rms_mask | low_peak_mask | high_silence_mask)
+    quality_filtered = prepared[quality_mask].copy()
+
+    clip_filtered = quality_filtered[
+        quality_filtered["duration_s"].ge(min_audio_duration_s) & quality_filtered["duration_s"].le(max_audio_duration_s)
     ].copy()
 
     speaker_stats_before_cap = _speaker_stats(clip_filtered) if not clip_filtered.empty else pd.DataFrame(
@@ -190,6 +235,8 @@ def apply_training_slice_filters(
         speaker_stats_final = speaker_stats_final.merge(extras, on="source_speaker_id", how="left")
 
     return TrainingSliceResult(
+        prepared_rows=prepared,
+        quality_filtered=quality_filtered,
         clip_filtered=clip_filtered,
         final_rows=final_rows,
         speaker_stats_before_cap=speaker_stats_before_cap,
@@ -197,6 +244,11 @@ def apply_training_slice_filters(
         warnings=warnings,
         invalid_duration_rows=invalid_duration_rows,
         negative_duration_rows=negative_duration_rows,
+        invalid_quality_rows=invalid_quality_rows,
+        excluded_by_low_rms=int(low_rms_mask.sum()),
+        excluded_by_high_rms=int(high_rms_mask.sum()),
+        excluded_by_low_peak=int(low_peak_mask.sum()),
+        excluded_by_high_silence_ratio=int(high_silence_mask.sum()),
         capped_speakers=capped_speakers,
         candidate_speakers=candidate_speakers,
         eligible_speakers=eligible_speakers,

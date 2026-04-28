@@ -330,7 +330,7 @@ Primeiro CSV operacional do pipeline. Representa o subset `pt-BR` extraído do `
 
 ### `common_voice_processed.csv`
 
-Versão processada após preprocessamento do áudio. Serve de base para a seleção de speakers.
+Versão processada após preprocessamento do áudio. Ela passa a carregar `audio_rms`, `audio_peak` e `audio_silence_ratio`, que são recalculáveis sobre WAVs já existentes pela fase `refresh_processed_audio_quality.py` e servem de base para a seleção automática de speakers.
 
 ### `data_manifest.csv`
 
@@ -409,12 +409,19 @@ Essa etapa é importante porque o subset linguístico é parte do desenho experi
 
 ### 3. Preprocessar áudio
 
-O áudio é convertido para um formato canônico do projeto, com organização estável em disco e cálculo explícito de duração. Isso reduz variabilidade entre etapas e simplifica a seleção e o treino.
+O áudio é convertido para um formato canônico do projeto, com organização estável em disco, cálculo explícito de duração e métricas básicas de energia. Isso reduz variabilidade entre etapas e simplifica a seleção e o treino.
 
-### 4. Selecionar speakers e gerar o manifesto
+### 4. Recalcular qualidade sobre o preprocessado
+
+Antes da curadoria final, o pipeline pode reabrir `common_voice_processed.csv` e recalcular `audio_rms`, `audio_peak` e `audio_silence_ratio` diretamente sobre os WAVs já processados, sem rerodar `ffmpeg`.
+
+Essa fase vira o novo ponto de reinício do fluxo. Quando os thresholds mudam, o procedimento canônico é atualizar esse metadata e reexecutar o restante do pipeline a partir daí.
+
+### 5. Selecionar speakers e gerar o manifesto
 
 Antes do ranking global, o framework aplica um recorte fixo no metadata:
 
+- remove clips com `rms` abaixo do mínimo, `rms` acima do máximo, `peak` abaixo do mínimo ou `silence_ratio` acima do máximo
 - mantém apenas clips com duração entre `2s` e `8s`
 - exige pelo menos `20` clips elegíveis por speaker
 - exige pelo menos `60s` totais por speaker após esse filtro
@@ -426,11 +433,11 @@ Depois disso, ele ranqueia speakers globalmente por duração disponível e sele
 - clips são acumulados até o teto passado para `select_speakers.py`
 - um subconjunto pequeno vira `val`
 - o restante vira `train`
-- o clip de referência é o primeiro selecionado, isto é, o de maior duração dentro do subconjunto escolhido
+- o clip de referência é o primeiro selecionado, isto é, o de maior duração dentro do subconjunto aprovado pelo filtro de qualidade
 
 Essa política favorece speakers com mais material útil e mantém um split simples e reprodutível.
 
-### 5. Extrair embeddings de síntese
+### 6. Extrair embeddings de síntese
 
 Os embeddings extraídos aqui não são para avaliação. Eles são os vetores consumidos pelo `SpeechT5` no momento da síntese.
 
@@ -440,7 +447,7 @@ Por isso o `speaker_embedding_path` no `samples.csv` representa o embedding de s
 
 Se você tiver artefatos antigos gerados com embeddings crus, trate a migração como breaking: reextraia `artifacts/embeddings/`, recrie `run_matrix` e `samples`, e reexecute treino, síntese e métricas antes de comparar resultados.
 
-### 6. Expandir o YAML em `run_matrix`
+### 7. Expandir o YAML em `run_matrix`
 
 Antes de treinar qualquer coisa, o framework materializa todas as combinações planejadas entre:
 
@@ -451,21 +458,21 @@ Antes de treinar qualquer coisa, o framework materializa todas as combinações 
 
 Isso torna o desenho explícito e auditável. Você consegue inspecionar o experimento antes de gastar GPU.
 
-### 7. Inicializar o ledger de samples
+### 8. Inicializar o ledger de samples
 
 `samples.csv` nasce antes da inferência para funcionar como ledger do experimento. O pipeline não trata samples como efeitos colaterais dispersos; ele os trata como entidades rastreáveis.
 
-### 8. Treinar LoRA e salvar checkpoints
+### 9. Treinar LoRA e salvar checkpoints
 
 Cada condição `LoRA` é treinada conforme o YAML. O treino salva checkpoints em passos definidos, e cada checkpoint passa a ser um candidato real de avaliação.
 
 `training.gpu_hourly_rate` também é definido por condicional no YAML. O parâmetro `--gpu-hourly-rate` do entrypoint existe apenas como sobrescrita global opcional da execução.
 
-### 9. Materializar áudio por checkpoint
+### 10. Materializar áudio por checkpoint
 
 Quando um checkpoint é salvo, o pipeline gera áudio com ele e preenche novas linhas no ledger. Isso transforma o histórico do treino em um conjunto comparável de saídas.
 
-### 10. Rodar ASR e métricas
+### 11. Rodar ASR e métricas
 
 Depois da síntese:
 
@@ -476,11 +483,11 @@ Depois da síntese:
 - `F0 RMSE` mede desvio de pitch
 - `RTF`, custo e horas de GPU completam a visão operacional
 
-### 11. Agregar e comparar
+### 12. Agregar e comparar
 
 O agregador trabalha sobre `analysis_condition`, que prioriza `checkpoint_label` quando ele existe. Na prática, isso significa que a comparação principal não é apenas entre "condições", mas entre checkpoints concretos.
 
-### 12. Gerar relatório e abrir a demo
+### 13. Gerar relatório e abrir a demo
 
 O fim do pipeline produz:
 
@@ -595,9 +602,16 @@ Campos principais:
 - `gradient_accumulation_steps`
 - `effective_batch_size`
 - `fp16`
+- `bf16`
+- `early_stopping_patience`
+- `early_stopping_threshold`
 - `gradient_checkpointing`
 - `save_steps`
 - `eval_steps`
+
+`fp16` e `bf16` são mutuamente exclusivos. Nesta base, `training.bf16` é suportado via `Seq2SeqTrainingArguments.bf16`, mas `TrainingArguments.torch_dtype` não é usado porque a API disponível no `.venv` atual não expõe esse campo.
+
+`early stopping` e opt-in: ele so e ativado quando `training.early_stopping_patience` aparece no YAML. Nesse caso, o treino exige avaliacao habilitada, `load_best_model_at_end=true` e uma metrica monitorada em `metric_for_best_model`. Se `save_steps` for diferente de `eval_steps`, a parada efetiva pode atrasar ate o proximo save step por comportamento do `transformers`.
 
 ### `scope: per_speaker` versus `scope: unique`
 
@@ -642,6 +656,9 @@ Este perfil é próximo da configuração oficial atual. A ideia é adaptar com 
     effective_batch_size: 4
     per_device_eval_batch_size: 2
     fp16: true
+    bf16: false
+    # early_stopping_patience: 3
+    # early_stopping_threshold: 0.001
     gradient_checkpointing: true
     save_steps: 500
     eval_steps: 500
@@ -679,6 +696,9 @@ Este perfil aumenta capacidade e pressão de otimização. Deve ser lido como po
     effective_batch_size: 8
     per_device_eval_batch_size: 4
     fp16: true
+    bf16: false
+    # early_stopping_patience: 3
+    # early_stopping_threshold: 0.001
     gradient_checkpointing: false
     save_steps: 500
     eval_steps: 500

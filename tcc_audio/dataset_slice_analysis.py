@@ -9,7 +9,7 @@ from typing import Any, Mapping
 
 import pandas as pd
 
-from tcc_audio.cli_defaults import DEFAULT_RAW_METADATA_PATH
+from tcc_audio.cli_defaults import DEFAULT_PROCESSED_METADATA_PATH
 from tcc_audio.dataset_filtering import (
     DEFAULT_MAX_AUDIO_DURATION_S,
     DEFAULT_MAX_CLIPS_PER_SPEAKER,
@@ -19,6 +19,13 @@ from tcc_audio.dataset_filtering import (
     apply_training_slice_filters,
 )
 from tcc_audio.io import ensure_parent_dir, read_csv
+from tcc_audio.processed_audio_quality import (
+    DEFAULT_PEAK_MIN,
+    DEFAULT_RMS_MAX,
+    DEFAULT_RMS_MIN,
+    DEFAULT_SILENCE_RATIO_MAX,
+    QUALITY_METRIC_COLUMNS,
+)
 
 
 def _to_minutes(seconds: float) -> float:
@@ -82,18 +89,25 @@ def _distribution(values: pd.Series) -> dict[str, float | None]:
 
 def analyze_dataset_slice(
     *,
-    metadata_path: str | Path = DEFAULT_RAW_METADATA_PATH,
+    metadata_path: str | Path = DEFAULT_PROCESSED_METADATA_PATH,
     min_audio_duration_s: float = DEFAULT_MIN_AUDIO_DURATION_S,
     max_audio_duration_s: float = DEFAULT_MAX_AUDIO_DURATION_S,
     min_clips_per_speaker: int = DEFAULT_MIN_CLIPS_PER_SPEAKER,
     max_clips_per_speaker: int = DEFAULT_MAX_CLIPS_PER_SPEAKER,
     min_duration_per_speaker_s: float = DEFAULT_MIN_DURATION_PER_SPEAKER_S,
+    rms_min: float = DEFAULT_RMS_MIN,
+    rms_max: float = DEFAULT_RMS_MAX,
+    peak_min: float = DEFAULT_PEAK_MIN,
+    silence_ratio_max: float = DEFAULT_SILENCE_RATIO_MAX,
 ) -> dict[str, Any]:
     metadata = read_csv(metadata_path)
-    required = {"source_speaker_id", "duration_s", "locale", "variant", "gender"}
+    required = {"source_speaker_id", "duration_s", "locale", "variant", "gender", *QUALITY_METRIC_COLUMNS}
     missing = sorted(required.difference(metadata.columns))
     if missing:
-        raise ValueError(f"Metadata must contain columns: {', '.join(missing)}")
+        raise ValueError(
+            f"Processed metadata must contain columns: {', '.join(missing)}. "
+            "Run `python3 scripts/refresh_processed_audio_quality.py` first."
+        )
 
     filtered = apply_training_slice_filters(
         metadata,
@@ -102,6 +116,10 @@ def analyze_dataset_slice(
         min_clips_per_speaker=min_clips_per_speaker,
         max_clips_per_speaker=max_clips_per_speaker,
         min_duration_per_speaker_s=min_duration_per_speaker_s,
+        rms_min=rms_min,
+        rms_max=rms_max,
+        peak_min=peak_min,
+        silence_ratio_max=silence_ratio_max,
     )
 
     speaker_stats = filtered.speaker_stats_final.copy()
@@ -113,8 +131,19 @@ def analyze_dataset_slice(
             "min_clips_per_speaker": int(min_clips_per_speaker),
             "max_clips_per_speaker": int(max_clips_per_speaker),
             "min_duration_per_speaker_s": float(min_duration_per_speaker_s),
+            "rms_min": float(rms_min),
+            "rms_max": float(rms_max),
+            "peak_min": float(peak_min),
+            "silence_ratio_max": float(silence_ratio_max),
         },
         "steps": {
+            "audio_quality_filter": {
+                **_frame_totals(filtered.quality_filtered),
+                "excluded_by_low_rms": int(filtered.excluded_by_low_rms),
+                "excluded_by_high_rms": int(filtered.excluded_by_high_rms),
+                "excluded_by_low_peak": int(filtered.excluded_by_low_peak),
+                "excluded_by_high_silence_ratio": int(filtered.excluded_by_high_silence_ratio),
+            },
             "clip_filter": _frame_totals(filtered.clip_filtered),
             "speaker_eligibility": {
                 "candidate_speakers": int(filtered.candidate_speakers),
@@ -130,6 +159,11 @@ def analyze_dataset_slice(
         },
         "final_dataset": _frame_totals(filtered.final_rows),
         "grouped_by_locale_variant_gender": _grouped_summary(filtered.final_rows),
+        "quality_distribution": {
+            "audio_rms": _distribution(filtered.prepared_rows["audio_rms"]),
+            "audio_peak": _distribution(filtered.prepared_rows["audio_peak"]),
+            "audio_silence_ratio": _distribution(filtered.prepared_rows["audio_silence_ratio"]),
+        },
         "speaker_distribution": {
             "clips_per_speaker": _distribution(speaker_stats["clip_count"]) if not speaker_stats.empty else _distribution(pd.Series(dtype=float)),
             "duration_per_speaker_s": _distribution(speaker_stats["total_duration_s"]) if not speaker_stats.empty else _distribution(pd.Series(dtype=float)),
@@ -160,29 +194,40 @@ def _render_distribution_line(label: str, distribution: Mapping[str, Any]) -> st
 
 def render_dataset_slice_analysis(analysis: Mapping[str, Any]) -> str:
     filters = analysis["filters"]
+    quality_filter = analysis["steps"]["audio_quality_filter"]
     clip_filter = analysis["steps"]["clip_filter"]
     speaker_eligibility = analysis["steps"]["speaker_eligibility"]
     clip_cap = analysis["steps"]["clip_cap"]
     final_dataset = analysis["final_dataset"]
     grouped = analysis["grouped_by_locale_variant_gender"]
-    distribution = analysis["speaker_distribution"]
+    quality_distribution = analysis["quality_distribution"]
+    speaker_distribution = analysis["speaker_distribution"]
 
     lines = [
         "DATASET FINAL SLICE",
         "FILTERS",
         (
-            f"- min_audio_duration_s={filters['min_audio_duration_s']} "
-            f"max_audio_duration_s={filters['max_audio_duration_s']} "
-            f"min_clips_per_speaker={filters['min_clips_per_speaker']} "
-            f"max_clips_per_speaker={filters['max_clips_per_speaker']} "
+            f"- rms_min={filters['rms_min']} rms_max={filters['rms_max']} "
+            f"peak_min={filters['peak_min']} silence_ratio_max={filters['silence_ratio_max']} "
+            f"min_audio_duration_s={filters['min_audio_duration_s']} max_audio_duration_s={filters['max_audio_duration_s']} "
+            f"min_clips_per_speaker={filters['min_clips_per_speaker']} max_clips_per_speaker={filters['max_clips_per_speaker']} "
             f"min_duration_per_speaker_s={filters['min_duration_per_speaker_s']}"
         ),
-        "STEP 1 CLIP FILTER",
+        "STEP 1 AUDIO QUALITY FILTER",
+        (
+            f"- total_clips={quality_filter['total_clips']} total_minutes={quality_filter['total_minutes']:.3f} "
+            f"unique_speakers={quality_filter['unique_speakers']} "
+            f"excluded_by_low_rms={quality_filter['excluded_by_low_rms']} "
+            f"excluded_by_high_rms={quality_filter['excluded_by_high_rms']} "
+            f"excluded_by_low_peak={quality_filter['excluded_by_low_peak']} "
+            f"excluded_by_high_silence_ratio={quality_filter['excluded_by_high_silence_ratio']}"
+        ),
+        "STEP 2 CLIP FILTER",
         (
             f"- total_clips={clip_filter['total_clips']} total_minutes={clip_filter['total_minutes']:.3f} "
             f"unique_speakers={clip_filter['unique_speakers']}"
         ),
-        "STEP 2 SPEAKER ELIGIBILITY",
+        "STEP 3 SPEAKER ELIGIBILITY",
         (
             f"- candidate_speakers={speaker_eligibility['candidate_speakers']} "
             f"eligible_speakers={speaker_eligibility['eligible_speakers']} "
@@ -190,7 +235,7 @@ def render_dataset_slice_analysis(analysis: Mapping[str, Any]) -> str:
             f"excluded_by_min_clips={speaker_eligibility['excluded_by_min_clips']} "
             f"excluded_by_min_duration={speaker_eligibility['excluded_by_min_duration']}"
         ),
-        "STEP 3 CLIP CAP",
+        "STEP 4 CLIP CAP",
         f"- max_clips_per_speaker={clip_cap['max_clips_per_speaker']} capped_speakers={clip_cap['capped_speakers']}",
         "FINAL DATASET",
         (
@@ -208,9 +253,13 @@ def render_dataset_slice_analysis(analysis: Mapping[str, Any]) -> str:
 
     lines.extend(
         [
+            "QUALITY DISTRIBUTION",
+            _render_distribution_line("audio_rms", quality_distribution["audio_rms"]),
+            _render_distribution_line("audio_peak", quality_distribution["audio_peak"]),
+            _render_distribution_line("audio_silence_ratio", quality_distribution["audio_silence_ratio"]),
             "SPEAKER DISTRIBUTION",
-            _render_distribution_line("clips_per_speaker", distribution["clips_per_speaker"]),
-            _render_distribution_line("duration_per_speaker_s", distribution["duration_per_speaker_s"]),
+            _render_distribution_line("clips_per_speaker", speaker_distribution["clips_per_speaker"]),
+            _render_distribution_line("duration_per_speaker_s", speaker_distribution["duration_per_speaker_s"]),
         ]
     )
 
@@ -225,12 +274,16 @@ def render_dataset_slice_analysis(analysis: Mapping[str, Any]) -> str:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Simulate the final dataset recorte using the training-slice rules.")
-    parser.add_argument("-m", "--metadata", default=str(DEFAULT_RAW_METADATA_PATH), help="Path to the raw metadata CSV.")
+    parser.add_argument("-m", "--metadata", default=str(DEFAULT_PROCESSED_METADATA_PATH), help="Path to the processed metadata CSV.")
     parser.add_argument("--min-audio-duration-s", type=float, default=DEFAULT_MIN_AUDIO_DURATION_S)
     parser.add_argument("--max-audio-duration-s", type=float, default=DEFAULT_MAX_AUDIO_DURATION_S)
     parser.add_argument("--min-clips-per-speaker", type=int, default=DEFAULT_MIN_CLIPS_PER_SPEAKER)
     parser.add_argument("--max-clips-per-speaker", type=int, default=DEFAULT_MAX_CLIPS_PER_SPEAKER)
     parser.add_argument("--min-duration-per-speaker-s", type=float, default=DEFAULT_MIN_DURATION_PER_SPEAKER_S)
+    parser.add_argument("--rms-min", type=float, default=DEFAULT_RMS_MIN)
+    parser.add_argument("--rms-max", type=float, default=DEFAULT_RMS_MAX)
+    parser.add_argument("--peak-min", type=float, default=DEFAULT_PEAK_MIN)
+    parser.add_argument("--silence-ratio-max", type=float, default=DEFAULT_SILENCE_RATIO_MAX)
     parser.add_argument("-j", "--json-out", help="Optional path to persist the analysis JSON.")
     return parser
 
@@ -245,6 +298,10 @@ def main(argv: list[str] | None = None) -> int:
             min_clips_per_speaker=args.min_clips_per_speaker,
             max_clips_per_speaker=args.max_clips_per_speaker,
             min_duration_per_speaker_s=args.min_duration_per_speaker_s,
+            rms_min=args.rms_min,
+            rms_max=args.rms_max,
+            peak_min=args.peak_min,
+            silence_ratio_max=args.silence_ratio_max,
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc

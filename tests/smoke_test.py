@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tcc_audio.common_voice import prepare_common_voice_metadata
-from tcc_audio.audio_preprocess import build_arg_parser as build_audio_preprocess_arg_parser
+from tcc_audio.audio_preprocess import build_arg_parser as build_audio_preprocess_arg_parser, preprocess_audio_dataset
 from tcc_audio.common_voice_download import (
     download_common_voice_pt,
     request_dataset_download_session,
@@ -81,6 +81,11 @@ from tcc_audio.experiments import build_arg_parser as build_run_matrix_arg_parse
 from tcc_audio.evaluation import aggregate_metrics
 from tcc_audio.manifest import build_arg_parser as build_manifest_arg_parser, validate_data_manifest, validate_prompts
 from tcc_audio.report_assets import build_arg_parser as build_report_assets_arg_parser, make_report_assets
+from tcc_audio.processed_audio_quality import (
+    AudioQualityThresholds,
+    build_arg_parser as build_quality_refresh_arg_parser,
+    refresh_processed_audio_quality,
+)
 from tcc_audio.runtime import load_samples
 from tcc_audio.samples import (
     build_arg_parser as build_samples_arg_parser,
@@ -237,6 +242,9 @@ def _repeated_speaker_rows(
     locale: str = "pt",
     variant: str = "pt-BR",
     target_text: str = "Texto de teste.",
+    audio_rms: float = 0.05,
+    audio_peak: float = 0.3,
+    audio_silence_ratio: float = 0.2,
 ) -> list[dict[str, str | float]]:
     rows: list[dict[str, str | float]] = []
     for utterance_index in range(clip_count):
@@ -252,6 +260,9 @@ def _repeated_speaker_rows(
                 "source": "common_voice_pt",
                 "locale": locale,
                 "variant": variant,
+                "audio_rms": audio_rms,
+                "audio_peak": audio_peak,
+                "audio_silence_ratio": audio_silence_ratio,
             }
         )
     return rows
@@ -288,6 +299,9 @@ def _write_dataset_slice_metadata(tmp: Path) -> Path:
                 "source": "common_voice_pt",
                 "locale": "pt",
                 "variant": "pt-BR",
+                "audio_rms": 0.05,
+                "audio_peak": 0.3,
+                "audio_silence_ratio": 0.2,
             },
             {
                 "source_speaker_id": "speaker_negative",
@@ -300,6 +314,9 @@ def _write_dataset_slice_metadata(tmp: Path) -> Path:
                 "source": "common_voice_pt",
                 "locale": "pt",
                 "variant": "pt-BR",
+                "audio_rms": 0.05,
+                "audio_peak": 0.3,
+                "audio_silence_ratio": 0.2,
             },
         ]
     )
@@ -333,13 +350,22 @@ def _write_inventory_config(tmp: Path) -> Path:
     return config
 
 
-def _write_wav(path: Path, *, sample_rate: int = 16000, channels: int = 1, frames: int = 32) -> None:
+def _write_wav_samples(path: Path, samples: np.ndarray, *, sample_rate: int = 16000, channels: int = 1) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    audio = np.asarray(samples, dtype=np.float32)
+    if channels > 1:
+        audio = np.repeat(audio[:, None], channels, axis=1)
+    pcm = np.clip(audio, -1.0, 1.0)
+    pcm = (pcm * 32767.0).astype("<i2")
     with wave.open(str(path), "wb") as handle:
         handle.setnchannels(channels)
         handle.setsampwidth(2)
         handle.setframerate(sample_rate)
-        handle.writeframes(b"\x00\x00" * frames * channels)
+        handle.writeframes(pcm.tobytes())
+
+
+def _write_wav(path: Path, *, sample_rate: int = 16000, channels: int = 1, frames: int = 32) -> None:
+    _write_wav_samples(path, np.zeros(frames, dtype=np.float32), sample_rate=sample_rate, channels=channels)
 
 
 def _prepare_dataset_inventory_fixture(tmp: Path) -> dict[str, Path]:
@@ -424,16 +450,35 @@ def test_build_audio_preprocess_arg_parser_uses_canonical_defaults() -> None:
     assert args.sample_rate is None
 
 
+def test_build_quality_refresh_arg_parser_defaults_to_optional_paths() -> None:
+    parser = build_quality_refresh_arg_parser()
+    args = parser.parse_args([])
+
+    assert args.config is None
+    assert args.metadata is None
+    assert args.project_root == "."
+    assert args.rms_min == 0.005
+    assert args.rms_max == 0.20
+    assert args.peak_min == 0.02
+    assert args.silence_ratio_max == 0.45
+    assert args.invalidate_downstream is False
+    assert args.bypass is False
+
+
 def test_build_dataset_slice_analysis_arg_parser_uses_canonical_defaults() -> None:
     parser = build_dataset_slice_analysis_arg_parser()
     args = parser.parse_args([])
 
-    assert args.metadata == str(DEFAULT_RAW_METADATA_PATH)
+    assert args.metadata == str(DEFAULT_PROCESSED_METADATA_PATH)
     assert args.min_audio_duration_s == 2.0
     assert args.max_audio_duration_s == 8.0
     assert args.min_clips_per_speaker == 20
     assert args.max_clips_per_speaker == 120
     assert args.min_duration_per_speaker_s == 60.0
+    assert args.rms_min == 0.005
+    assert args.rms_max == 0.20
+    assert args.peak_min == 0.02
+    assert args.silence_ratio_max == 0.45
     assert args.json_out is None
 
 
@@ -526,6 +571,180 @@ def test_build_samples_arg_parser_defaults_to_optional_paths() -> None:
     assert args.run_matrix is None
     assert args.out is None
     assert args.audio_base_dir == str(DEFAULT_AUDIO_BASE_DIR)
+
+
+def test_preprocess_audio_dataset_writes_audio_quality_metrics() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        source_audio = tmp / "raw.wav"
+        _write_wav_samples(source_audio, np.full(1600, 0.1, dtype=np.float32))
+        metadata = tmp / "metadata.csv"
+        pd.DataFrame(
+            [
+                {
+                    "source_speaker_id": "speaker_a",
+                    "utterance_id": "utt_001",
+                    "audio_path": str(source_audio),
+                    "target_text": "Texto.",
+                }
+            ]
+        ).to_csv(metadata, index=False)
+
+        def fake_run(command: list[str], check: bool, capture_output: bool):
+            del check, capture_output
+            Path(command[-1]).write_bytes(Path(command[3]).read_bytes())
+            return types.SimpleNamespace(returncode=0)
+
+        with patch("tcc_audio.audio_preprocess.subprocess.run", side_effect=fake_run):
+            processed = preprocess_audio_dataset(
+                metadata_path=metadata,
+                out_dir=tmp / "processed",
+                out_metadata=tmp / "processed.csv",
+                overwrite=True,
+            )
+
+    assert "audio_rms" in processed.columns
+    assert "audio_peak" in processed.columns
+    assert "audio_silence_ratio" in processed.columns
+    assert float(processed.loc[0, "audio_rms"]) > 0.09
+    assert float(processed.loc[0, "audio_peak"]) > 0.09
+    assert float(processed.loc[0, "audio_silence_ratio"]) == 0.0
+
+
+def test_refresh_processed_audio_quality_overwrites_existing_metadata_without_ffmpeg() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        loud_audio = tmp / "processed/loud.wav"
+        quiet_audio = tmp / "processed/quiet.wav"
+        _write_wav_samples(loud_audio, np.full(1600, 0.1, dtype=np.float32))
+        _write_wav_samples(quiet_audio, np.zeros(1600, dtype=np.float32))
+        metadata = tmp / "processed.csv"
+        pd.DataFrame(
+            [
+                {
+                    "source_speaker_id": "speaker_a",
+                    "utterance_id": "utt_loud",
+                    "duration_s": 0.1,
+                    "audio_path": str(loud_audio),
+                    "audio_rms": 999.0,
+                    "audio_peak": 999.0,
+                    "audio_silence_ratio": 999.0,
+                },
+                {
+                    "source_speaker_id": "speaker_b",
+                    "utterance_id": "utt_quiet",
+                    "duration_s": 0.1,
+                    "audio_path": str(quiet_audio),
+                    "audio_rms": 999.0,
+                    "audio_peak": 999.0,
+                    "audio_silence_ratio": 999.0,
+                },
+            ]
+        ).to_csv(metadata, index=False)
+        with patch("subprocess.run", side_effect=AssertionError("ffmpeg should not run during quality refresh")):
+            result = refresh_processed_audio_quality(
+                metadata_path=metadata,
+                thresholds=AudioQualityThresholds(),
+            )
+        refreshed = pd.read_csv(metadata)
+
+    assert result.row_count == 2
+    assert result.summary.passing_rows == 1
+    assert result.summary.excluded_rows == 1
+    assert result.summary.excluded_by_low_rms == 1
+    assert result.summary.excluded_by_low_peak == 1
+    assert result.summary.excluded_by_high_silence_ratio == 1
+    assert float(refreshed.loc[0, "audio_rms"]) < 1.0
+    assert float(refreshed.loc[1, "audio_rms"]) == 0.0
+    assert float(refreshed.loc[1, "audio_peak"]) == 0.0
+    assert float(refreshed.loc[1, "audio_silence_ratio"]) == 1.0
+
+
+def test_refresh_processed_audio_quality_invalidate_downstream_preserves_processed_audio() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        processed_audio = tmp / "data/processed/common_voice_pt/speaker_a/utt.wav"
+        _write_wav_samples(processed_audio, np.full(1600, 0.1, dtype=np.float32))
+        metadata = tmp / "data/manifests/common_voice_processed.csv"
+        metadata.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            [
+                {
+                    "source_speaker_id": "speaker_a",
+                    "utterance_id": "utt",
+                    "duration_s": 0.1,
+                    "audio_path": str(processed_audio),
+                }
+            ]
+        ).to_csv(metadata, index=False)
+        config = tmp / "config.yaml"
+        config.write_text(
+            "data:\n"
+            f"  processed_metadata_path: {metadata}\n"
+            f"  manifest_path: {tmp / 'data/manifests/data_manifest.csv'}\n"
+            f"  speaker_selection_path: {tmp / 'data/manifests/speaker_selection.csv'}\n"
+            f"  speaker_embeddings_index: {tmp / 'artifacts/embeddings/speaker_embeddings.csv'}\n"
+            "deliverables:\n"
+            f"  run_matrix: {tmp / 'artifacts/run_matrix.csv'}\n"
+            f"  samples: {tmp / 'artifacts/evaluation/samples.csv'}\n"
+            f"  report_assets_dir: {tmp / 'report_assets'}\n",
+            encoding="utf-8",
+        )
+
+        downstream_files = [
+            tmp / "data/manifests/data_manifest.csv",
+            tmp / "data/manifests/speaker_selection.csv",
+            tmp / "artifacts/embeddings/speaker_embeddings.csv",
+            tmp / "artifacts/run_matrix.csv",
+            tmp / "artifacts/evaluation/samples.csv",
+            tmp / "artifacts/dataset_inventory.json",
+            tmp / "artifacts/dataset_slice_analysis.json",
+        ]
+        for path in downstream_files:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x", encoding="utf-8")
+        for path in [
+            tmp / "artifacts/embeddings/vector.npy",
+            tmp / "artifacts/checkpoints/lora/cond_a/marker.txt",
+            tmp / "artifacts/audio/cond_a/sample.wav",
+            tmp / "artifacts/evaluation/metrics_summary.csv",
+            tmp / "report_assets/overview.md",
+        ]:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x", encoding="utf-8")
+
+        result = refresh_processed_audio_quality(
+            metadata_path=metadata,
+            config_path=config,
+            invalidate_downstream=True,
+            bypass=True,
+        )
+        metadata_exists = metadata.exists()
+        processed_audio_exists = processed_audio.exists()
+        manifest_exists = (tmp / "data/manifests/data_manifest.csv").exists()
+        speaker_selection_exists = (tmp / "data/manifests/speaker_selection.csv").exists()
+        embeddings_dir_exists = (tmp / "artifacts/embeddings").exists()
+        run_matrix_exists = (tmp / "artifacts/run_matrix.csv").exists()
+        evaluation_dir_exists = (tmp / "artifacts/evaluation").exists()
+        checkpoint_dir_exists = (tmp / "artifacts/checkpoints/lora").exists()
+        audio_dir_exists = (tmp / "artifacts/audio").exists()
+        report_assets_exists = (tmp / "report_assets").exists()
+        inventory_exists = (tmp / "artifacts/dataset_inventory.json").exists()
+        slice_analysis_exists = (tmp / "artifacts/dataset_slice_analysis.json").exists()
+
+    assert metadata_exists is True
+    assert processed_audio_exists is True
+    assert result.invalidation is not None
+    assert manifest_exists is False
+    assert speaker_selection_exists is False
+    assert embeddings_dir_exists is False
+    assert run_matrix_exists is False
+    assert evaluation_dir_exists is False
+    assert checkpoint_dir_exists is False
+    assert audio_dir_exists is False
+    assert report_assets_exists is False
+    assert inventory_exists is False
+    assert slice_analysis_exists is False
 
 
 def test_run_matrix_generation() -> None:
@@ -1864,6 +2083,22 @@ def test_analyze_dataset_slice_rejects_invalid_clip_bounds() -> None:
     assert "min_clips_per_speaker must be <= max_clips_per_speaker" in message
 
 
+def test_analyze_dataset_slice_requires_quality_columns() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        metadata = _write_dataset_slice_metadata(tmp)
+        frame = pd.read_csv(metadata).drop(columns=["audio_rms", "audio_peak", "audio_silence_ratio"])
+        frame.to_csv(metadata, index=False)
+        try:
+            analyze_dataset_slice(metadata_path=metadata)
+        except ValueError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("Expected analyze_dataset_slice to reject metadata without quality metrics.")
+
+    assert "refresh_processed_audio_quality.py" in message
+
+
 def test_analyze_dataset_slice_handles_empty_result_and_warnings() -> None:
     with TemporaryDirectory() as tmpdir:
         metadata = _write_dataset_slice_metadata(Path(tmpdir))
@@ -1878,7 +2113,7 @@ def test_analyze_dataset_slice_handles_empty_result_and_warnings() -> None:
     }
     assert analysis["grouped_by_locale_variant_gender"] == []
     assert analysis["speaker_distribution"]["clips_per_speaker"]["min"] is None
-    assert "STEP 1 CLIP FILTER" in report
+    assert "STEP 1 AUDIO QUALITY FILTER" in report
     assert "FINAL DATASET" in report
     assert "WARNINGS" in report
     assert "Discarded 1 rows with invalid duration_s." in report
@@ -1907,13 +2142,38 @@ def test_dataset_slice_analysis_main_renders_and_writes_json(capsys) -> None:
     assert exit_code == 0
     assert "DATASET FINAL SLICE" in output
     assert "FILTERS" in output
-    assert "STEP 3 CLIP CAP" in output
+    assert "STEP 1 AUDIO QUALITY FILTER" in output
+    assert "STEP 4 CLIP CAP" in output
     assert "GROUPED BY locale / variant / gender" in output
+    assert "QUALITY DISTRIBUTION" in output
     assert "SPEAKER DISTRIBUTION" in output
     assert "speaker_concentration" not in output
     assert f"Wrote JSON analysis to {json_out}" in output
     assert saved["steps"]["clip_cap"]["max_clips_per_speaker"] == 30
     assert saved["final_dataset"]["total_clips"] == 75
+
+
+def test_speaker_selection_rejects_missing_quality_columns() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        metadata = tmp / "metadata.csv"
+        rows = pd.DataFrame(_repeated_speaker_rows("speaker_a", gender="unknown", clip_count=20, duration_s=4.0))
+        rows = rows.drop(columns=["audio_rms", "audio_peak", "audio_silence_ratio"])
+        rows.to_csv(metadata, index=False)
+        try:
+            select_speakers(
+                metadata,
+                tmp / "data_manifest.csv",
+                tmp / "speaker_selection.csv",
+                speaker_target_count=1,
+            )
+        except ValueError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("Expected speaker selection to reject metadata without quality metrics.")
+
+    assert "audio quality columns" in message
+    assert "refresh_processed_audio_quality.py" in message
 
 
 def test_speaker_selection_from_processed_metadata() -> None:
@@ -1971,6 +2231,80 @@ def test_speaker_selection_from_processed_metadata() -> None:
             "source",
             "notes",
         }
+
+
+def test_speaker_selection_drops_speaker_below_minimum_after_quality_filter() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        rows = []
+        rows.extend(_repeated_speaker_rows("speaker_good", gender="unknown", clip_count=20, duration_s=4.0))
+        speaker_bad_rows = _repeated_speaker_rows("speaker_bad", gender="unknown", clip_count=20, duration_s=4.0)
+        speaker_bad_rows[0]["audio_rms"] = 0.0
+        speaker_bad_rows[0]["audio_peak"] = 0.0
+        speaker_bad_rows[0]["audio_silence_ratio"] = 1.0
+        rows.extend(speaker_bad_rows)
+        metadata = tmp / "metadata.csv"
+        pd.DataFrame(rows).to_csv(metadata, index=False)
+
+        manifest, speaker_selection = select_speakers(
+            metadata,
+            tmp / "data_manifest.csv",
+            tmp / "speaker_selection.csv",
+            speaker_target_count=2,
+            minutes_per_speaker=20,
+        )
+
+    assert manifest["speaker_id"].nunique() == 1
+    assert speaker_selection["source_speaker_id"].tolist() == ["speaker_good"]
+
+
+def test_speaker_selection_reference_audio_uses_longest_approved_clip() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        rows: list[dict[str, object]] = []
+        for utterance_id, duration_s, audio_rms, audio_peak, audio_silence_ratio in [
+            ("speaker_ref_000", 7.0, 0.0, 0.0, 1.0),
+            ("speaker_ref_001", 6.5, 0.05, 0.3, 0.2),
+        ]:
+            rows.append(
+                {
+                    "source_speaker_id": "speaker_ref",
+                    "gender": "unknown",
+                    "utterance_id": utterance_id,
+                    "duration_s": duration_s,
+                    "audio_path": f"audio/{utterance_id}.wav",
+                    "target_text": "Texto.",
+                    "license": "CC0",
+                    "source": "common_voice_pt",
+                    "locale": "pt",
+                    "variant": "pt-BR",
+                    "audio_rms": audio_rms,
+                    "audio_peak": audio_peak,
+                    "audio_silence_ratio": audio_silence_ratio,
+                }
+            )
+        rows.extend(
+            _repeated_speaker_rows(
+                "speaker_ref",
+                gender="unknown",
+                clip_count=19,
+                duration_s=6.0,
+            )
+        )
+        rows.extend(_repeated_speaker_rows("speaker_other", gender="unknown", clip_count=20, duration_s=4.0))
+        metadata = tmp / "metadata.csv"
+        pd.DataFrame(rows).to_csv(metadata, index=False)
+
+        _, speaker_selection = select_speakers(
+            metadata,
+            tmp / "data_manifest.csv",
+            tmp / "speaker_selection.csv",
+            speaker_target_count=2,
+            minutes_per_speaker=20,
+        )
+        reference_row = speaker_selection[speaker_selection["source_speaker_id"].eq("speaker_ref")].iloc[0]
+
+    assert str(reference_row["reference_audio"]).endswith("speaker_ref_001.wav")
 
 
 def test_speaker_selection_includes_shorter_speakers_when_ranked_globally() -> None:
@@ -2311,6 +2645,301 @@ def test_build_training_args_uses_warmup_steps() -> None:
     assert "warmup_ratio" not in training_args.kwargs
 
 
+def test_build_training_args_enables_bf16_when_supported_and_cuda_available() -> None:
+    class FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+    class FakeTorch:
+        cuda = FakeCuda()
+
+    class FakeTrainingArguments:
+        __dataclass_fields__ = {
+            "output_dir": None,
+            "fp16": None,
+            "bf16": None,
+            "dataloader_pin_memory": None,
+        }
+
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    training_args = _build_training_args(
+        stack={"torch": FakeTorch(), "Seq2SeqTrainingArguments": FakeTrainingArguments},
+        output_dir="artifacts/checkpoints/test",
+        training_config={"bf16": True},
+        has_eval_dataset=False,
+    )
+
+    assert training_args.kwargs["bf16"] is True
+    assert training_args.kwargs["fp16"] is False
+    assert training_args.kwargs["dataloader_pin_memory"] is True
+
+
+def test_build_training_args_disables_bf16_without_cuda(capsys) -> None:
+    class FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return False
+
+    class FakeTorch:
+        cuda = FakeCuda()
+
+    class FakeTrainingArguments:
+        __dataclass_fields__ = {
+            "output_dir": None,
+            "bf16": None,
+            "dataloader_pin_memory": None,
+        }
+
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    training_args = _build_training_args(
+        stack={"torch": FakeTorch(), "Seq2SeqTrainingArguments": FakeTrainingArguments},
+        output_dir="artifacts/checkpoints/test",
+        training_config={"bf16": True},
+        has_eval_dataset=False,
+    )
+
+    assert training_args.kwargs["bf16"] is False
+    assert training_args.kwargs["dataloader_pin_memory"] is False
+    assert "training.bf16=true ignored because CUDA is not available" in capsys.readouterr().out
+
+
+def test_build_training_args_rejects_conflicting_fp16_and_bf16() -> None:
+    class FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+    class FakeTorch:
+        cuda = FakeCuda()
+
+    class FakeTrainingArguments:
+        __dataclass_fields__ = {"output_dir": None, "fp16": None, "bf16": None}
+
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    try:
+        _build_training_args(
+            stack={"torch": FakeTorch(), "Seq2SeqTrainingArguments": FakeTrainingArguments},
+            output_dir="artifacts/checkpoints/test",
+            training_config={"fp16": True, "bf16": True},
+            has_eval_dataset=False,
+        )
+    except ValueError as exc:
+        assert "training.fp16" in str(exc)
+        assert "training.bf16" in str(exc)
+        assert "mutually exclusive" in str(exc)
+    else:
+        raise AssertionError("expected _build_training_args to reject conflicting fp16/bf16 flags")
+
+
+def test_build_training_args_warns_when_bf16_is_not_supported(capsys) -> None:
+    class FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return True
+
+    class FakeTorch:
+        cuda = FakeCuda()
+
+    class FakeTrainingArguments:
+        __dataclass_fields__ = {
+            "output_dir": None,
+            "fp16": None,
+            "dataloader_pin_memory": None,
+        }
+
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    training_args = _build_training_args(
+        stack={"torch": FakeTorch(), "Seq2SeqTrainingArguments": FakeTrainingArguments},
+        output_dir="artifacts/checkpoints/test",
+        training_config={"bf16": True},
+        has_eval_dataset=False,
+    )
+
+    assert "bf16" not in training_args.kwargs
+    assert (
+        "training.bf16=true ignored because this transformers version does not support "
+        "Seq2SeqTrainingArguments.bf16"
+    ) in capsys.readouterr().out
+
+
+def test_build_training_args_rejects_non_positive_early_stopping_patience() -> None:
+    class FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return False
+
+    class FakeTorch:
+        cuda = FakeCuda()
+
+    class FakeTrainingArguments:
+        __dataclass_fields__ = {"output_dir": None}
+
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    try:
+        _build_training_args(
+            stack={"torch": FakeTorch(), "Seq2SeqTrainingArguments": FakeTrainingArguments},
+            output_dir="artifacts/checkpoints/test",
+            training_config={"early_stopping_patience": 0, "load_best_model_at_end": True},
+            has_eval_dataset=True,
+        )
+    except ValueError as exc:
+        assert "early_stopping_patience" in str(exc)
+        assert "greater than 0" in str(exc)
+    else:
+        raise AssertionError("expected _build_training_args to reject non-positive early_stopping_patience")
+
+
+def test_build_training_args_rejects_negative_early_stopping_threshold() -> None:
+    class FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return False
+
+    class FakeTorch:
+        cuda = FakeCuda()
+
+    class FakeTrainingArguments:
+        __dataclass_fields__ = {"output_dir": None}
+
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    try:
+        _build_training_args(
+            stack={"torch": FakeTorch(), "Seq2SeqTrainingArguments": FakeTrainingArguments},
+            output_dir="artifacts/checkpoints/test",
+            training_config={
+                "early_stopping_patience": 3,
+                "early_stopping_threshold": -0.001,
+                "load_best_model_at_end": True,
+            },
+            has_eval_dataset=True,
+        )
+    except ValueError as exc:
+        assert "early_stopping_threshold" in str(exc)
+        assert "greater than or equal to 0" in str(exc)
+    else:
+        raise AssertionError("expected _build_training_args to reject negative early_stopping_threshold")
+
+
+def test_build_training_args_rejects_early_stopping_without_load_best_model() -> None:
+    class FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return False
+
+    class FakeTorch:
+        cuda = FakeCuda()
+
+    class FakeTrainingArguments:
+        __dataclass_fields__ = {"output_dir": None}
+
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    try:
+        _build_training_args(
+            stack={"torch": FakeTorch(), "Seq2SeqTrainingArguments": FakeTrainingArguments},
+            output_dir="artifacts/checkpoints/test",
+            training_config={"early_stopping_patience": 3, "load_best_model_at_end": False},
+            has_eval_dataset=True,
+        )
+    except ValueError as exc:
+        assert "load_best_model_at_end=true" in str(exc)
+    else:
+        raise AssertionError("expected _build_training_args to require load_best_model_at_end for early stopping")
+
+
+def test_build_training_args_rejects_early_stopping_without_evaluation_strategy() -> None:
+    class FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return False
+
+    class FakeTorch:
+        cuda = FakeCuda()
+
+    class FakeTrainingArguments:
+        __dataclass_fields__ = {
+            "output_dir": None,
+            "save_steps": None,
+            "eval_steps": None,
+            "load_best_model_at_end": None,
+            "evaluation_strategy": None,
+        }
+
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    try:
+        _build_training_args(
+            stack={"torch": FakeTorch(), "Seq2SeqTrainingArguments": FakeTrainingArguments},
+            output_dir="artifacts/checkpoints/test",
+            training_config={
+                "early_stopping_patience": 3,
+                "load_best_model_at_end": True,
+                "evaluation_strategy": "no",
+            },
+            has_eval_dataset=True,
+        )
+    except ValueError as exc:
+        assert "evaluation_strategy" in str(exc) or "eval_strategy" in str(exc)
+        assert "!= 'no'" in str(exc)
+    else:
+        raise AssertionError("expected _build_training_args to reject early stopping without evaluation")
+
+
+def test_build_training_args_warns_when_early_stopping_save_and_eval_steps_differ(capsys) -> None:
+    class FakeCuda:
+        @staticmethod
+        def is_available() -> bool:
+            return False
+
+    class FakeTorch:
+        cuda = FakeCuda()
+
+    class FakeTrainingArguments:
+        __dataclass_fields__ = {
+            "output_dir": None,
+            "save_strategy": None,
+            "save_steps": None,
+            "eval_steps": None,
+            "load_best_model_at_end": None,
+            "evaluation_strategy": None,
+        }
+
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    _build_training_args(
+        stack={"torch": FakeTorch(), "Seq2SeqTrainingArguments": FakeTrainingArguments},
+        output_dir="artifacts/checkpoints/test",
+        training_config={
+            "early_stopping_patience": 3,
+            "early_stopping_threshold": 0.001,
+            "load_best_model_at_end": True,
+            "evaluation_strategy": "steps",
+            "save_strategy": "steps",
+            "save_steps": 500,
+            "eval_steps": 100,
+        },
+        has_eval_dataset=True,
+    )
+
+    assert "training.save_steps != training.eval_steps" in capsys.readouterr().out
+
+
 def test_build_training_args_rejects_warmup_ratio() -> None:
     class FakeCuda:
         @staticmethod
@@ -2378,6 +3007,194 @@ def test_build_trainer_uses_labels_only_for_speecht5_eval() -> None:
     assert trainer.label_names == ["labels"]
     assert trainer.evaluation_has_labels({"labels": object()})
     assert not trainer.evaluation_has_labels({"stop_labels": object()})
+
+
+def test_build_trainer_adds_early_stopping_callback() -> None:
+    class FakeEarlyStoppingCallback:
+        def __init__(self, early_stopping_patience: int = 1, early_stopping_threshold: float | None = 0.0):
+            self.early_stopping_patience = early_stopping_patience
+            self.early_stopping_threshold = early_stopping_threshold
+
+    class FakeTrainer:
+        def __init__(
+            self,
+            model=None,
+            args=None,
+            train_dataset=None,
+            eval_dataset=None,
+            data_collator=None,
+            tokenizer=None,
+            callbacks=None,
+        ):
+            self.model = model
+            self.args = args
+            self.train_dataset = train_dataset
+            self.eval_dataset = eval_dataset
+            self.data_collator = data_collator
+            self.tokenizer = tokenizer
+            self.callbacks = callbacks or []
+
+    class FakeModel:
+        config = types.SimpleNamespace(reduction_factor=1)
+
+    class FakeProcessor:
+        def pad(self, *args, **kwargs):
+            raise AssertionError("pad should not be called in this test")
+
+    training_args = types.SimpleNamespace(label_names=["labels"])
+    with patch("tcc_audio.speecht5_runner._make_collator", return_value=object()):
+        trainer = _build_trainer(
+            stack={
+                "Seq2SeqTrainer": FakeTrainer,
+                "EarlyStoppingCallback": FakeEarlyStoppingCallback,
+                "torch": object(),
+            },
+            model=FakeModel(),
+            training_args=training_args,
+            processor=FakeProcessor(),
+            train_dataset=[],
+            eval_dataset=[object()],
+            training_config={
+                "early_stopping_patience": 3,
+                "early_stopping_threshold": 0.001,
+                "load_best_model_at_end": True,
+            },
+        )
+
+    assert len(trainer.callbacks) == 1
+    assert trainer.callbacks[0].early_stopping_patience == 3
+    assert trainer.callbacks[0].early_stopping_threshold == 0.001
+
+
+def test_build_trainer_defaults_early_stopping_threshold_to_zero() -> None:
+    class FakeEarlyStoppingCallback:
+        def __init__(self, early_stopping_patience: int = 1, early_stopping_threshold: float | None = 0.0):
+            self.early_stopping_patience = early_stopping_patience
+            self.early_stopping_threshold = early_stopping_threshold
+
+    class FakeTrainer:
+        def __init__(
+            self,
+            model=None,
+            args=None,
+            train_dataset=None,
+            eval_dataset=None,
+            data_collator=None,
+            tokenizer=None,
+            callbacks=None,
+        ):
+            self.callbacks = callbacks or []
+
+    class FakeModel:
+        config = types.SimpleNamespace(reduction_factor=1)
+
+    class FakeProcessor:
+        def pad(self, *args, **kwargs):
+            raise AssertionError("pad should not be called in this test")
+
+    with patch("tcc_audio.speecht5_runner._make_collator", return_value=object()):
+        trainer = _build_trainer(
+            stack={
+                "Seq2SeqTrainer": FakeTrainer,
+                "EarlyStoppingCallback": FakeEarlyStoppingCallback,
+                "torch": object(),
+            },
+            model=FakeModel(),
+            training_args=types.SimpleNamespace(label_names=["labels"]),
+            processor=FakeProcessor(),
+            train_dataset=[],
+            eval_dataset=[object()],
+            training_config={
+                "early_stopping_patience": 3,
+                "load_best_model_at_end": True,
+            },
+        )
+
+    assert len(trainer.callbacks) == 1
+    assert trainer.callbacks[0].early_stopping_threshold == 0.0
+
+
+def test_build_trainer_omits_callbacks_when_early_stopping_is_not_configured() -> None:
+    class FakeTrainer:
+        def __init__(
+            self,
+            model=None,
+            args=None,
+            train_dataset=None,
+            eval_dataset=None,
+            data_collator=None,
+            tokenizer=None,
+            callbacks=None,
+        ):
+            self.callbacks = callbacks
+
+    class FakeModel:
+        config = types.SimpleNamespace(reduction_factor=1)
+
+    class FakeProcessor:
+        def pad(self, *args, **kwargs):
+            raise AssertionError("pad should not be called in this test")
+
+    with patch("tcc_audio.speecht5_runner._make_collator", return_value=object()):
+        trainer = _build_trainer(
+            stack={"Seq2SeqTrainer": FakeTrainer, "EarlyStoppingCallback": object, "torch": object()},
+            model=FakeModel(),
+            training_args=types.SimpleNamespace(label_names=["labels"]),
+            processor=FakeProcessor(),
+            train_dataset=[],
+            eval_dataset=[object()],
+            training_config={"load_best_model_at_end": True},
+        )
+
+    assert trainer.callbacks is None
+
+
+def test_build_trainer_warns_and_disables_early_stopping_without_eval_dataset(capsys) -> None:
+    class FakeTrainer:
+        def __init__(
+            self,
+            model=None,
+            args=None,
+            train_dataset=None,
+            eval_dataset=None,
+            data_collator=None,
+            tokenizer=None,
+            callbacks=None,
+        ):
+            self.callbacks = callbacks
+
+    class FakeEarlyStoppingCallback:
+        def __init__(self, early_stopping_patience: int = 1, early_stopping_threshold: float | None = 0.0):
+            self.early_stopping_patience = early_stopping_patience
+            self.early_stopping_threshold = early_stopping_threshold
+
+    class FakeModel:
+        config = types.SimpleNamespace(reduction_factor=1)
+
+    class FakeProcessor:
+        def pad(self, *args, **kwargs):
+            raise AssertionError("pad should not be called in this test")
+
+    with patch("tcc_audio.speecht5_runner._make_collator", return_value=object()):
+        trainer = _build_trainer(
+            stack={
+                "Seq2SeqTrainer": FakeTrainer,
+                "EarlyStoppingCallback": FakeEarlyStoppingCallback,
+                "torch": object(),
+            },
+            model=FakeModel(),
+            training_args=types.SimpleNamespace(label_names=["labels"]),
+            processor=FakeProcessor(),
+            train_dataset=[],
+            eval_dataset=None,
+            training_config={
+                "early_stopping_patience": 3,
+                "load_best_model_at_end": True,
+            },
+        )
+
+    assert trainer.callbacks is None
+    assert "early stopping ignored because the selected training unit has no validation rows" in capsys.readouterr().out
 
 
 def test_speecht5_runtime_loader_does_not_require_training_stack(monkeypatch) -> None:

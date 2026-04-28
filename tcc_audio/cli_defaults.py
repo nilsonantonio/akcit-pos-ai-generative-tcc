@@ -27,6 +27,7 @@ DEFAULT_EVALUATION_DIR = Path("artifacts/evaluation")
 DEFAULT_METRICS_PATH = DEFAULT_EVALUATION_DIR / "metrics_summary.csv"
 DEFAULT_COSTS_PATH = DEFAULT_EVALUATION_DIR / "cost_summary.csv"
 DEFAULT_DATASET_INVENTORY_JSON = Path("artifacts/dataset_inventory.json")
+DEFAULT_DATASET_SLICE_ANALYSIS_JSON = Path("artifacts/dataset_slice_analysis.json")
 DEFAULT_REPORT_ASSETS_DIR = Path("report_assets")
 DEFAULT_NISQA_PATH = Path("NISQA")
 DEFAULT_TRAINING_COST_SUMMARY_PATH = DEFAULT_EVALUATION_DIR / "manual_training_costs_summary.csv"

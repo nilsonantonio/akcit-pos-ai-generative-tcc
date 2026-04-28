@@ -77,9 +77,10 @@ def _load_training_stack():
     stack = _load_torch_stack()
     _ensure_lzma_available()
     try:
-        from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments
+        from transformers import EarlyStoppingCallback, Seq2SeqTrainer, Seq2SeqTrainingArguments
     except ImportError as exc:
         raise SystemExit("Missing SpeechT5 training dependencies. Install with requirements-gpu.txt.") from exc
+    stack["EarlyStoppingCallback"] = EarlyStoppingCallback
     stack["Seq2SeqTrainer"] = Seq2SeqTrainer
     stack["Seq2SeqTrainingArguments"] = Seq2SeqTrainingArguments
     return stack
@@ -626,6 +627,34 @@ def _validate_effective_batch_size(training_config: Mapping[str, Any]) -> None:
         )
 
 
+def _resolve_early_stopping_config(training_config: Mapping[str, Any]) -> dict[str, float | int] | None:
+    patience_raw = training_config.get("early_stopping_patience")
+    if patience_raw in (None, ""):
+        return None
+    try:
+        patience = int(patience_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("training.early_stopping_patience must be an integer greater than 0.") from exc
+    if patience <= 0:
+        raise ValueError("training.early_stopping_patience must be greater than 0.")
+
+    threshold_raw = training_config.get("early_stopping_threshold", 0.0)
+    try:
+        threshold = float(threshold_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("training.early_stopping_threshold must be a float greater than or equal to 0.") from exc
+    if threshold < 0:
+        raise ValueError("training.early_stopping_threshold must be greater than or equal to 0.")
+
+    if not bool(training_config.get("load_best_model_at_end", False)):
+        raise ValueError("training.early_stopping_patience requires training.load_best_model_at_end=true.")
+
+    return {
+        "early_stopping_patience": patience,
+        "early_stopping_threshold": threshold,
+    }
+
+
 def _build_training_args(
     stack: Mapping[str, Any],
     output_dir: str | Path,
@@ -635,15 +664,27 @@ def _build_training_args(
     torch = stack["torch"]
     fields = stack["Seq2SeqTrainingArguments"].__dataclass_fields__
     _validate_effective_batch_size(training_config)
+    early_stopping_config = _resolve_early_stopping_config(training_config)
 
     if "warmup_ratio" in training_config:
         raise ValueError(
             "training.warmup_ratio is no longer supported. Replace it with training.warmup_steps."
         )
 
+    cuda_available = bool(torch.cuda.is_available())
     fp16_requested = bool(training_config.get("fp16", False))
-    if fp16_requested and not torch.cuda.is_available():
+    bf16_requested = bool(training_config.get("bf16", False))
+    if fp16_requested and bf16_requested:
+        raise ValueError("training.fp16 and training.bf16 are mutually exclusive; enable only one of them.")
+    if fp16_requested and not cuda_available:
         print("Warning: training.fp16=true ignored because CUDA is not available.")
+    if bf16_requested and not cuda_available:
+        print("Warning: training.bf16=true ignored because CUDA is not available.")
+    if bf16_requested and "bf16" not in fields:
+        print(
+            "Warning: training.bf16=true ignored because this transformers version does not support "
+            "Seq2SeqTrainingArguments.bf16."
+        )
 
     kwargs: dict[str, Any] = {
         "output_dir": str(output_dir),
@@ -666,8 +707,9 @@ def _build_training_args(
         "gradient_checkpointing": bool(training_config.get("gradient_checkpointing", False)),
         "report_to": [],
         "label_names": ["labels"],
-        "fp16": bool(torch.cuda.is_available() and fp16_requested),
-        "dataloader_pin_memory": bool(torch.cuda.is_available()),
+        "fp16": bool(cuda_available and fp16_requested),
+        "bf16": bool(cuda_available and bf16_requested and "bf16" in fields),
+        "dataloader_pin_memory": cuda_available,
     }
 
     if training_config.get("save_total_limit") not in (None, ""):
@@ -678,11 +720,23 @@ def _build_training_args(
 
     if has_eval_dataset:
         eval_strategy_value = training_config.get("eval_strategy", training_config.get("evaluation_strategy", "steps"))
+        if early_stopping_config and str(eval_strategy_value).strip().lower() == "no":
+            raise ValueError("training.early_stopping_patience requires training.eval_strategy/evaluation_strategy != 'no'.")
         kwargs["eval_steps"] = int(training_config.get("eval_steps", kwargs["save_steps"]))
         if "eval_strategy" in fields:
             kwargs["eval_strategy"] = eval_strategy_value
         else:
             kwargs["evaluation_strategy"] = eval_strategy_value
+        if (
+            early_stopping_config
+            and str(training_config.get("save_strategy", "steps")).strip().lower() == "steps"
+            and str(eval_strategy_value).strip().lower() == "steps"
+            and int(kwargs["save_steps"]) != int(kwargs["eval_steps"])
+        ):
+            print(
+                "Warning: early stopping may stop only at the next save step because "
+                "training.save_steps != training.eval_steps."
+            )
     else:
         kwargs["load_best_model_at_end"] = False
         if "eval_strategy" in fields:
@@ -697,6 +751,26 @@ def _build_training_args(
     return stack["Seq2SeqTrainingArguments"](**filtered)
 
 
+def _build_trainer_callbacks(
+    stack: Mapping[str, Any],
+    training_config: Mapping[str, Any] | None,
+    has_eval_dataset: bool,
+) -> list[object]:
+    resolved_training_config = training_config or {}
+    early_stopping_config = _resolve_early_stopping_config(resolved_training_config)
+    if early_stopping_config is None:
+        return []
+    if not has_eval_dataset:
+        print("Warning: early stopping ignored because the selected training unit has no validation rows.")
+        return []
+    return [
+        stack["EarlyStoppingCallback"](
+            early_stopping_patience=int(early_stopping_config["early_stopping_patience"]),
+            early_stopping_threshold=float(early_stopping_config["early_stopping_threshold"]),
+        )
+    ]
+
+
 def _build_trainer(
     stack: Mapping[str, Any],
     model: object,
@@ -704,6 +778,7 @@ def _build_trainer(
     processor: object,
     train_dataset: object,
     eval_dataset: object | None,
+    training_config: Mapping[str, Any] | None = None,
 ):
     trainer_kwargs = {
         "model": model,
@@ -713,6 +788,13 @@ def _build_trainer(
         "data_collator": _make_collator(processor, model),
     }
     trainer_signature = inspect.signature(stack["Seq2SeqTrainer"].__init__)
+    callbacks = _build_trainer_callbacks(
+        stack=stack,
+        training_config=training_config,
+        has_eval_dataset=eval_dataset is not None,
+    )
+    if callbacks and "callbacks" in trainer_signature.parameters:
+        trainer_kwargs["callbacks"] = callbacks
     if "processing_class" in trainer_signature.parameters:
         trainer_kwargs["processing_class"] = processor
     else:
@@ -793,6 +875,7 @@ def _train_condition(
                 processor=processor,
                 train_dataset=dataset_class(unit_train_rows, processor),
                 eval_dataset=dataset_class(unit_val_rows, processor) if not unit_val_rows.empty else None,
+                training_config=training_config,
             )
 
             _log_training_dataset_summary(

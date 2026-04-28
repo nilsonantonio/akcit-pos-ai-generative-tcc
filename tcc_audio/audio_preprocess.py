@@ -17,6 +17,7 @@ from tcc_audio.cli_defaults import (
     resolve_sample_rate,
 )
 from tcc_audio.io import ensure_parent_dir, read_csv
+from tcc_audio.processed_audio_quality import append_audio_quality_metrics
 
 
 def wav_duration_seconds(path: str | Path) -> float:
@@ -70,7 +71,7 @@ def preprocess_audio_dataset(
         processed["duration_s"] = wav_duration_seconds(target_path)
         output_rows.append(processed)
 
-    processed_frame = pd.DataFrame(output_rows)
+    processed_frame = append_audio_quality_metrics(pd.DataFrame(output_rows))
     ensure_parent_dir(out_metadata)
     processed_frame.to_csv(out_metadata, index=False)
     return processed_frame

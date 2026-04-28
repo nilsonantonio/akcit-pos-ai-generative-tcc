@@ -81,6 +81,18 @@ Preprocesse os audios para WAV mono:
 python3 scripts/preprocess_audio_dataset.py
 ```
 
+Recalcule as métricas de qualidade sobre os WAVs já processados e, se for reiniciar o pipeline dessa fase em diante, invalide os artefatos posteriores:
+
+```bash
+python3 scripts/refresh_processed_audio_quality.py --invalidate-downstream
+```
+
+Esse comando:
+
+- reaproveita os WAVs já existentes em `data/processed/`
+- sobrescreve `common_voice_processed.csv` com `audio_rms`, `audio_peak` e `audio_silence_ratio`
+- remove `speaker_selection.csv`, `data_manifest.csv`, embeddings, `run_matrix`, `samples`, checkpoints, audios gerados, agregados em `artifacts/evaluation/` e `report_assets/`
+
 Selecione os speakers da curadoria e gere o manifesto:
 
 ```bash
@@ -109,8 +121,12 @@ Analise recortes do dataset por duração antes de decidir o subset de treino:
 python3 scripts/log_dataset_slice_analysis.py
 ```
 
-O comando lê `data/manifests/common_voice_metadata.csv` e simula diretamente o recorte final do dataset com a política padrão:
+O comando lê `data/manifests/common_voice_processed.csv` e simula diretamente o recorte final do dataset com a política padrão:
 
+- `rms_min=0.005`
+- `rms_max=0.20`
+- `peak_min=0.02`
+- `silence_ratio_max=0.45`
 - `min_audio_duration_s=2`
 - `max_audio_duration_s=8`
 - `min_clips_per_speaker=20`
@@ -119,17 +135,22 @@ O comando lê `data/manifests/common_voice_metadata.csv` e simula diretamente o 
 
 Ele reporta:
 
+- totais após o filtro de qualidade
 - totais após o filtro de clip
 - quantos speakers sobrevivem pelos mínimos
 - quantos speakers foram truncados pelo teto de clips
 - totais do dataset final
 - agregação final por `locale`, `variant` e `gender`
-- distribuição compacta de `clips_per_speaker` e `duration_per_speaker_s`
+- distribuição compacta de `audio_rms`, `audio_peak`, `audio_silence_ratio`, `clips_per_speaker` e `duration_per_speaker_s`
 
 Se quiser persistir o estudo para comparação posterior:
 
 ```bash
 python3 scripts/log_dataset_slice_analysis.py \
+  --rms-min 0.005 \
+  --rms-max 0.20 \
+  --peak-min 0.02 \
+  --silence-ratio-max 0.45 \
   --min-audio-duration-s 2 \
   --max-audio-duration-s 8 \
   --min-clips-per-speaker 20 \

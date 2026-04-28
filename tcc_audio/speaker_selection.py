@@ -21,6 +21,14 @@ from tcc_audio.dataset_filtering import (
     apply_training_slice_filters,
 )
 from tcc_audio.io import ensure_parent_dir, read_csv
+from tcc_audio.processed_audio_quality import (
+    DEFAULT_PEAK_MIN,
+    DEFAULT_RMS_MAX,
+    DEFAULT_RMS_MIN,
+    DEFAULT_SILENCE_RATIO_MAX,
+    QUALITY_REFRESH_COMMAND,
+    require_audio_quality_columns,
+)
 from tcc_audio.speecht5_text import normalize_text_for_speecht5
 
 
@@ -40,6 +48,10 @@ def _validate_input(metadata: pd.DataFrame) -> None:
     missing = [column for column in INPUT_COLUMNS if column not in metadata.columns]
     if missing:
         raise ValueError(f"Missing speaker selection input columns: {', '.join(missing)}")
+    require_audio_quality_columns(
+        metadata,
+        label="Speaker selection metadata",
+    )
 
 
 def _validation_count(selected_count: int, val_ratio: float) -> int:
@@ -61,6 +73,10 @@ def select_speakers(
     min_clips_per_speaker: int = DEFAULT_MIN_CLIPS_PER_SPEAKER,
     max_clips_per_speaker: int = DEFAULT_MAX_CLIPS_PER_SPEAKER,
     min_duration_per_speaker_s: float = DEFAULT_MIN_DURATION_PER_SPEAKER_S,
+    rms_min: float = DEFAULT_RMS_MIN,
+    rms_max: float = DEFAULT_RMS_MAX,
+    peak_min: float = DEFAULT_PEAK_MIN,
+    silence_ratio_max: float = DEFAULT_SILENCE_RATIO_MAX,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     metadata = read_csv(metadata_path)
     _validate_input(metadata)
@@ -71,6 +87,10 @@ def select_speakers(
         min_clips_per_speaker=min_clips_per_speaker,
         max_clips_per_speaker=max_clips_per_speaker,
         min_duration_per_speaker_s=min_duration_per_speaker_s,
+        rms_min=rms_min,
+        rms_max=rms_max,
+        peak_min=peak_min,
+        silence_ratio_max=silence_ratio_max,
     )
     metadata = filtered.final_rows.copy()
 
@@ -120,7 +140,7 @@ def select_speakers(
                 "reference_duration_s": float(reference_row["duration_s"]),
                 "license": reference_row["license"],
                 "source": reference_row["source"],
-                "notes": "Auto-selected from processed metadata; manually audit audio before training.",
+                "notes": "Auto-selected from processed metadata after automated audio-quality filtering.",
             }
         )
 
@@ -174,25 +194,41 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-clips-per-speaker", type=int, default=DEFAULT_MIN_CLIPS_PER_SPEAKER)
     parser.add_argument("--max-clips-per-speaker", type=int, default=DEFAULT_MAX_CLIPS_PER_SPEAKER)
     parser.add_argument("--min-duration-per-speaker-s", type=float, default=DEFAULT_MIN_DURATION_PER_SPEAKER_S)
+    parser.add_argument("--rms-min", type=float, default=DEFAULT_RMS_MIN)
+    parser.add_argument("--rms-max", type=float, default=DEFAULT_RMS_MAX)
+    parser.add_argument("--peak-min", type=float, default=DEFAULT_PEAK_MIN)
+    parser.add_argument("--silence-ratio-max", type=float, default=DEFAULT_SILENCE_RATIO_MAX)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    manifest, speaker_selection = select_speakers(
-        metadata_path=args.metadata,
-        manifest_out=args.manifest_out,
-        speaker_selection_out=args.speaker_selection_out,
-        speaker_target_count=args.speaker_target_count,
-        minutes_per_speaker=args.minutes_per_speaker,
-        val_ratio=args.val_ratio,
-        seed=args.seed,
-        min_audio_duration_s=args.min_audio_duration_s,
-        max_audio_duration_s=args.max_audio_duration_s,
-        min_clips_per_speaker=args.min_clips_per_speaker,
-        max_clips_per_speaker=args.max_clips_per_speaker,
-        min_duration_per_speaker_s=args.min_duration_per_speaker_s,
-    )
+    try:
+        manifest, speaker_selection = select_speakers(
+            metadata_path=args.metadata,
+            manifest_out=args.manifest_out,
+            speaker_selection_out=args.speaker_selection_out,
+            speaker_target_count=args.speaker_target_count,
+            minutes_per_speaker=args.minutes_per_speaker,
+            val_ratio=args.val_ratio,
+            seed=args.seed,
+            min_audio_duration_s=args.min_audio_duration_s,
+            max_audio_duration_s=args.max_audio_duration_s,
+            min_clips_per_speaker=args.min_clips_per_speaker,
+            max_clips_per_speaker=args.max_clips_per_speaker,
+            min_duration_per_speaker_s=args.min_duration_per_speaker_s,
+            rms_min=args.rms_min,
+            rms_max=args.rms_max,
+            peak_min=args.peak_min,
+            silence_ratio_max=args.silence_ratio_max,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        if "audio quality columns" in message:
+            raise SystemExit(
+                f"{message} Run `{QUALITY_REFRESH_COMMAND} --metadata {args.metadata}` first."
+            ) from exc
+        raise SystemExit(message) from exc
     print(f"Selected {speaker_selection['speaker_id'].nunique() if not speaker_selection.empty else 0} speakers")
     print(f"Wrote {len(manifest)} manifest rows")
     return 0

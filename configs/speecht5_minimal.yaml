@@ -47,6 +47,9 @@ conditions:
       effective_batch_size: 4
       per_device_eval_batch_size: 2
       fp16: true
+      bf16: false
+      # early_stopping_patience: 3
+      # early_stopping_threshold: 0.001
       gradient_checkpointing: true
       max_grad_norm: 1.0
       weight_decay: 0.01
@@ -88,6 +91,9 @@ conditions:
       effective_batch_size: 4
       per_device_eval_batch_size: 2
       fp16: true
+      bf16: false
+      # early_stopping_patience: 3
+      # early_stopping_threshold: 0.001
       gradient_checkpointing: false
       max_grad_norm: 1.0
       weight_decay: 0.01
