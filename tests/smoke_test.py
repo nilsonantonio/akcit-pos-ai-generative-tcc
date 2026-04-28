@@ -71,6 +71,12 @@ from tcc_audio.dataset_inventory import (
     render_dataset_inventory,
     resolve_inventory_paths,
 )
+from tcc_audio.dataset_slice_analysis import (
+    analyze_dataset_slice,
+    build_arg_parser as build_dataset_slice_analysis_arg_parser,
+    main as dataset_slice_analysis_main,
+    render_dataset_slice_analysis,
+)
 from tcc_audio.experiments import build_arg_parser as build_run_matrix_arg_parser, generate_run_matrix
 from tcc_audio.evaluation import aggregate_metrics
 from tcc_audio.manifest import build_arg_parser as build_manifest_arg_parser, validate_data_manifest, validate_prompts
@@ -222,6 +228,111 @@ def _write_cleanup_config(tmp: Path) -> Path:
     return config
 
 
+def _write_dataset_slice_metadata(tmp: Path) -> Path:
+    metadata = tmp / "common_voice_metadata.csv"
+    pd.DataFrame(
+        [
+            {
+                "source_speaker_id": "speaker_a",
+                "gender": "masculine",
+                "utterance_id": "utt_01",
+                "duration_s": "1.0",
+                "audio_path": "clips/utt_01.mp3",
+                "target_text": "Texto 1",
+                "license": "CC0-1.0",
+                "source": "common_voice_pt",
+                "locale": "pt",
+                "variant": "pt-BR",
+            },
+            {
+                "source_speaker_id": "speaker_a",
+                "gender": "masculine",
+                "utterance_id": "utt_02",
+                "duration_s": "3.0",
+                "audio_path": "clips/utt_02.mp3",
+                "target_text": "Texto 2",
+                "license": "CC0-1.0",
+                "source": "common_voice_pt",
+                "locale": "pt",
+                "variant": "pt-BR",
+            },
+            {
+                "source_speaker_id": "speaker_a",
+                "gender": "masculine",
+                "utterance_id": "utt_03",
+                "duration_s": "61.0",
+                "audio_path": "clips/utt_03.mp3",
+                "target_text": "Texto 3",
+                "license": "CC0-1.0",
+                "source": "common_voice_pt",
+                "locale": "pt",
+                "variant": "pt-BR",
+            },
+            {
+                "source_speaker_id": "speaker_b",
+                "gender": "",
+                "utterance_id": "utt_04",
+                "duration_s": "4.5",
+                "audio_path": "clips/utt_04.mp3",
+                "target_text": "Texto 4",
+                "license": "CC0-1.0",
+                "source": "common_voice_pt",
+                "locale": "pt",
+                "variant": "",
+            },
+            {
+                "source_speaker_id": "speaker_b",
+                "gender": "",
+                "utterance_id": "utt_05",
+                "duration_s": "605.0",
+                "audio_path": "clips/utt_05.mp3",
+                "target_text": "Texto 5",
+                "license": "CC0-1.0",
+                "source": "common_voice_pt",
+                "locale": "pt",
+                "variant": "",
+            },
+            {
+                "source_speaker_id": "speaker_c",
+                "gender": "feminine",
+                "utterance_id": "utt_06",
+                "duration_s": "8.5",
+                "audio_path": "clips/utt_06.mp3",
+                "target_text": "Texto 6",
+                "license": "CC0-1.0",
+                "source": "common_voice_pt",
+                "locale": "",
+                "variant": "pt-PT",
+            },
+            {
+                "source_speaker_id": "speaker_d",
+                "gender": "feminine",
+                "utterance_id": "utt_07",
+                "duration_s": "invalid",
+                "audio_path": "clips/utt_07.mp3",
+                "target_text": "Texto 7",
+                "license": "CC0-1.0",
+                "source": "common_voice_pt",
+                "locale": "pt",
+                "variant": "pt-PT",
+            },
+            {
+                "source_speaker_id": "speaker_e",
+                "gender": "masculine",
+                "utterance_id": "utt_08",
+                "duration_s": "-2.0",
+                "audio_path": "clips/utt_08.mp3",
+                "target_text": "Texto 8",
+                "license": "CC0-1.0",
+                "source": "common_voice_pt",
+                "locale": "pt",
+                "variant": "pt-BR",
+            },
+        ]
+    ).to_csv(metadata, index=False)
+    return metadata
+
+
 def _write_inventory_config(tmp: Path) -> Path:
     config = tmp / "config.yaml"
     config.write_text(
@@ -337,6 +448,18 @@ def test_build_audio_preprocess_arg_parser_uses_canonical_defaults() -> None:
     assert args.out_dir == "data/processed/common_voice_pt"
     assert args.out_metadata == str(DEFAULT_PROCESSED_METADATA_PATH)
     assert args.sample_rate is None
+
+
+def test_build_dataset_slice_analysis_arg_parser_uses_canonical_defaults() -> None:
+    parser = build_dataset_slice_analysis_arg_parser()
+    args = parser.parse_args([])
+
+    assert args.metadata == str(DEFAULT_RAW_METADATA_PATH)
+    assert args.min_seconds is None
+    assert args.max_seconds is None
+    assert args.range_seconds is None
+    assert args.top_speakers == 5
+    assert args.json_out is None
 
 
 def test_build_speaker_selection_arg_parser_accepts_aliases() -> None:
@@ -1413,6 +1536,194 @@ def test_build_dataset_inventory_degrades_when_ffprobe_is_unavailable(monkeypatc
     assert inventory["warnings"]
     assert "ffprobe not available" in "\n".join(inventory["warnings"])
     assert "WARNINGS" in report
+
+
+def test_analyze_dataset_slice_filters_with_min_seconds() -> None:
+    with TemporaryDirectory() as tmpdir:
+        metadata = _write_dataset_slice_metadata(Path(tmpdir))
+        analysis = analyze_dataset_slice(metadata_path=metadata, min_seconds=4.5, top_speakers=2)
+
+    assert analysis["overall_totals"]["total_clips"] == 4
+    assert analysis["overall_totals"]["unique_speakers"] == 3
+    assert round(float(analysis["overall_totals"]["total_minutes"]), 3) == 11.317
+    assert analysis["speaker_thresholds"] == [
+        {"threshold_minutes": 1, "speaker_count": 2},
+        {"threshold_minutes": 5, "speaker_count": 1},
+        {"threshold_minutes": 10, "speaker_count": 1},
+        {"threshold_minutes": 20, "speaker_count": 0},
+        {"threshold_minutes": 30, "speaker_count": 0},
+    ]
+    assert analysis["speaker_concentration"]["top_n"] == 2
+    assert len(analysis["speaker_concentration"]["speakers"]) == 2
+    assert analysis["speaker_concentration"]["speakers"][0]["source_speaker_id"] == "speaker_b"
+
+
+def test_analyze_dataset_slice_filters_with_max_seconds() -> None:
+    with TemporaryDirectory() as tmpdir:
+        metadata = _write_dataset_slice_metadata(Path(tmpdir))
+        analysis = analyze_dataset_slice(metadata_path=metadata, max_seconds=4.5, top_speakers=3)
+
+    assert analysis["overall_totals"]["total_clips"] == 3
+    assert analysis["overall_totals"]["unique_speakers"] == 2
+    assert round(float(analysis["overall_totals"]["total_minutes"]), 3) == 0.142
+    assert analysis["duration_bins"][0]["clip_count"] == 1
+    assert analysis["duration_bins"][1]["clip_count"] == 1
+    assert analysis["duration_bins"][2]["clip_count"] == 1
+
+
+def test_analyze_dataset_slice_filters_with_range_seconds() -> None:
+    with TemporaryDirectory() as tmpdir:
+        metadata = _write_dataset_slice_metadata(Path(tmpdir))
+        analysis = analyze_dataset_slice(metadata_path=metadata, min_seconds=2.0, max_seconds=8.5, top_speakers=3)
+
+    assert analysis["overall_totals"]["total_clips"] == 3
+    assert analysis["overall_totals"]["unique_speakers"] == 3
+    grouped = analysis["grouped_by_locale_variant_gender"]
+    assert grouped == [
+        {
+            "locale": "pt",
+            "variant": "pt-BR",
+            "gender": "masculine",
+            "clip_count": 1,
+            "total_duration_s": 3.0,
+            "total_minutes": 0.05,
+            "unique_speakers": 1,
+        },
+        {
+            "locale": "pt",
+            "variant": "unknown",
+            "gender": "unknown",
+            "clip_count": 1,
+            "total_duration_s": 4.5,
+            "total_minutes": 0.075,
+            "unique_speakers": 1,
+        },
+        {
+            "locale": "unknown",
+            "variant": "pt-PT",
+            "gender": "feminine",
+            "clip_count": 1,
+            "total_duration_s": 8.5,
+            "total_minutes": 0.14166666666666666,
+            "unique_speakers": 1,
+        },
+    ]
+    assert analysis["per_variant_gender"] == [
+        {
+            "variant": "pt-BR",
+            "gender": "masculine",
+            "clip_count": 1,
+            "total_duration_s": 3.0,
+            "total_minutes": 0.05,
+            "unique_speakers": 1,
+        },
+        {
+            "variant": "pt-PT",
+            "gender": "feminine",
+            "clip_count": 1,
+            "total_duration_s": 8.5,
+            "total_minutes": 0.14166666666666666,
+            "unique_speakers": 1,
+        },
+        {
+            "variant": "unknown",
+            "gender": "unknown",
+            "clip_count": 1,
+            "total_duration_s": 4.5,
+            "total_minutes": 0.075,
+            "unique_speakers": 1,
+        },
+    ]
+    assert analysis["duration_summary"]["min_s"] == 3.0
+    assert analysis["duration_summary"]["max_s"] == 8.5
+    assert round(float(analysis["duration_summary"]["median_s"]), 3) == 4.5
+
+
+def test_dataset_slice_analysis_main_rejects_invalid_range_combination() -> None:
+    with TemporaryDirectory() as tmpdir:
+        metadata = _write_dataset_slice_metadata(Path(tmpdir))
+        try:
+            dataset_slice_analysis_main(
+                [
+                    "--metadata",
+                    str(metadata),
+                    "--min-seconds",
+                    "2.0",
+                    "--range-seconds",
+                    "2.0",
+                    "8.0",
+                ]
+            )
+        except SystemExit as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("Expected invalid range combination to raise SystemExit.")
+
+    assert "--range-seconds cannot be combined" in message
+
+
+def test_analyze_dataset_slice_rejects_when_min_seconds_exceeds_max_seconds() -> None:
+    with TemporaryDirectory() as tmpdir:
+        metadata = _write_dataset_slice_metadata(Path(tmpdir))
+        try:
+            analyze_dataset_slice(metadata_path=metadata, min_seconds=5.0, max_seconds=2.0)
+        except ValueError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("Expected invalid min/max bounds to raise ValueError.")
+
+    assert "min_seconds must be <= max_seconds" in message
+
+
+def test_analyze_dataset_slice_handles_empty_result_and_warnings() -> None:
+    with TemporaryDirectory() as tmpdir:
+        metadata = _write_dataset_slice_metadata(Path(tmpdir))
+        analysis = analyze_dataset_slice(metadata_path=metadata, min_seconds=700.0, top_speakers=2)
+        report = render_dataset_slice_analysis(analysis)
+
+    assert analysis["overall_totals"] == {
+        "total_clips": 0,
+        "total_duration_s": 0.0,
+        "total_minutes": 0.0,
+        "unique_speakers": 0,
+    }
+    assert analysis["duration_summary"]["min_s"] is None
+    assert analysis["grouped_by_locale_variant_gender"] == []
+    assert all(row["clip_count"] == 0 for row in analysis["duration_bins"])
+    assert "WARNINGS" in report
+    assert "Discarded 1 rows with invalid duration_s." in report
+    assert "Discarded 1 rows with negative duration_s." in report
+
+
+def test_dataset_slice_analysis_main_renders_and_writes_json(capsys) -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        metadata = _write_dataset_slice_metadata(tmp)
+        json_out = tmp / "artifacts/dataset_slice_analysis.json"
+
+        exit_code = dataset_slice_analysis_main(
+            [
+                "--metadata",
+                str(metadata),
+                "--range-seconds",
+                "2.0",
+                "8.5",
+                "--top-speakers",
+                "2",
+                "--json-out",
+                str(json_out),
+            ]
+        )
+        output = capsys.readouterr().out
+        saved = json.loads(json_out.read_text(encoding="utf-8"))
+
+    assert exit_code == 0
+    assert "DATASET SLICE ANALYSIS" in output
+    assert "grouped_by_locale_variant_gender:" in output
+    assert "speaker_concentration:" in output
+    assert f"Wrote JSON analysis to {json_out}" in output
+    assert saved["overall_totals"]["total_clips"] == 3
+    assert saved["speaker_concentration"]["top_n"] == 2
 
 
 def test_speaker_selection_from_processed_metadata() -> None:

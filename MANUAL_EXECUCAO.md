@@ -103,6 +103,28 @@ Para forçar uma nova geração e sobrescrever o JSON:
 python3 scripts/log_dataset_inventory.py --override
 ```
 
+Analise recortes do dataset por duração antes de decidir o subset de treino:
+
+```bash
+python3 scripts/log_dataset_slice_analysis.py --range-seconds 2 8 --top-speakers 5
+```
+
+O comando lê `data/manifests/common_voice_metadata.csv`, aceita `--min-seconds`, `--max-seconds` ou `--range-seconds`, e reporta:
+
+- total de clips
+- total de minutos
+- total de locutores
+- agregação por `locale`, `variant` e `gender`
+- buckets de duração
+- cobertura mínima por speaker
+- concentração nos top speakers
+
+Se quiser persistir o estudo para comparação posterior:
+
+```bash
+python3 scripts/log_dataset_slice_analysis.py --min-seconds 4 --json-out artifacts/dataset_slice_analysis.json
+```
+
 Valide manifesto e prompts antes do treino:
 
 ```bash
