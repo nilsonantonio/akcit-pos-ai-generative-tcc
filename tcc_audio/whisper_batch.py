@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import argparse
 import platform
-from contextlib import contextmanager
+import tempfile
+from copy import deepcopy
 from pathlib import Path
 
 from tcc_audio.cli_defaults import DEFAULT_SAMPLES_PATH, load_cli_config, resolve_samples_path
@@ -15,7 +16,8 @@ from tcc_audio.config import (
     resolve_asr_model,
     resolve_asr_task,
 )
-from tcc_audio.runtime import load_samples, now_utc_iso, refresh_sample_status, save_samples
+from tcc_audio.io import ensure_parent_dir
+from tcc_audio.runtime import load_samples, now_utc_iso, refresh_sample_status
 
 
 def _load_asr_pipeline():
@@ -35,45 +37,55 @@ def _load_asr_pipeline():
     return pipeline, device
 
 
-def _build_generate_kwargs(transcriber, task: str, language: str) -> dict[str, object]:
-    generate_kwargs: dict[str, object] = {"task": task, "language": language}
-    suppress_tokens = getattr(transcriber.generation_config, "suppress_tokens", None)
-    begin_suppress_tokens = getattr(transcriber.generation_config, "begin_suppress_tokens", None)
+def _describe_device(device: object) -> str:
+    if isinstance(device, int):
+        return "CUDA" if device >= 0 else "CPU"
+    device_type = getattr(device, "type", str(device)).lower()
+    if device_type.startswith("cuda"):
+        return "CUDA"
+    if device_type.startswith("mps"):
+        return "MPS"
+    if device_type.startswith("cpu"):
+        return "CPU"
+    return device_type.upper()
+
+
+def _build_generation_config(transcriber, task: str, language: str):
+    generation_config = deepcopy(transcriber.generation_config)
+    generation_config.task = task
+    generation_config.language = language
+    generation_config.forced_decoder_ids = None
+
+    suppress_tokens = getattr(generation_config, "suppress_tokens", None)
+    begin_suppress_tokens = getattr(generation_config, "begin_suppress_tokens", None)
     if suppress_tokens is not None:
-        generate_kwargs["suppress_tokens"] = list(suppress_tokens)
+        generation_config.suppress_tokens = list(suppress_tokens)
     if begin_suppress_tokens is not None:
-        generate_kwargs["begin_suppress_tokens"] = list(begin_suppress_tokens)
-    return generate_kwargs
+        generation_config.begin_suppress_tokens = list(begin_suppress_tokens)
+    return generation_config
 
 
-@contextmanager
-def _without_default_whisper_suppression(transcriber):
-    generation_configs = []
-    pipeline_config = getattr(transcriber, "generation_config", None)
-    model = getattr(transcriber, "model", None)
-    model_config = getattr(model, "generation_config", None)
-    for config in (pipeline_config, model_config):
-        if config is not None and all(id(existing) != id(config) for existing in generation_configs):
-            generation_configs.append(config)
+def _save_samples_atomic(samples, path: str | Path) -> None:
+    destination = Path(path)
+    ensure_parent_dir(destination)
 
-    original_values = []
-    for config in generation_configs:
-        original_values.append(
-            (
-                config,
-                getattr(config, "suppress_tokens", None),
-                getattr(config, "begin_suppress_tokens", None),
-            )
-        )
-        config.suppress_tokens = None
-        config.begin_suppress_tokens = None
-
+    tmp_path: Path | None = None
     try:
-        yield
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            newline="",
+            dir=destination.parent,
+            prefix=f".{destination.stem}_",
+            suffix=destination.suffix,
+            delete=False,
+        ) as handle:
+            samples.to_csv(handle, index=False)
+            tmp_path = Path(handle.name)
+        tmp_path.replace(destination)
     finally:
-        for config, suppress_tokens, begin_suppress_tokens in original_values:
-            config.suppress_tokens = suppress_tokens
-            config.begin_suppress_tokens = begin_suppress_tokens
+        if tmp_path is not None and tmp_path.exists():
+            tmp_path.unlink()
 
 
 def run_whisper_batch(
@@ -90,33 +102,65 @@ def run_whisper_batch(
         model=model_name,
         device=device,
     )
-    generate_kwargs = _build_generate_kwargs(transcriber, task, language)
     samples = load_samples(samples_path)
     subset = samples[samples["audio_path"].astype(str).str.strip().ne("")]
+    already_transcribed = subset[subset["asr_text"].astype(str).str.strip().ne("")]
     if only_missing:
         subset = subset[subset["asr_text"].astype(str).str.strip().eq("")]
 
-    for _, row in subset.iterrows():
-        sample_id = row["sample_id"]
-        audio_path = Path(row["audio_path"])
+    pending_total = len(subset)
+    print(f"ASR device: {_describe_device(device)}")
+    print(f"ASR model: {model_name}")
+    print(f"Samples input: {samples_path}")
+    print(f"Samples output: {out_path}")
+    print(f"Rows total: {len(samples)}")
+    print(f"Rows with audio: {len(samples[samples['audio_path'].astype(str).str.strip().ne('')])}")
+    print(f"Rows already transcribed: {len(already_transcribed)}")
+    print(f"Rows pending this run: {pending_total}")
+
+    if pending_total == 0:
+        samples = refresh_sample_status(samples)
+        _save_samples_atomic(samples, out_path)
+        print("No pending ASR rows.")
+        return
+
+    completed = 0
+    failed = 0
+
+    for current, row in enumerate(subset.itertuples(index=False), start=1):
+        sample_id = row.sample_id
+        audio_path = Path(row.audio_path)
+        sample_mask = samples["sample_id"].eq(sample_id)
+        status = "ok"
+
         if not audio_path.exists():
-            samples.loc[samples["sample_id"].eq(sample_id), "failure_reason"] = f"missing audio: {audio_path}"
-            continue
-        try:
-            started = now_utc_iso()
-            with _without_default_whisper_suppression(transcriber):
+            samples.loc[sample_mask, "failure_reason"] = f"missing audio: {audio_path}"
+            status = "missing_audio"
+            failed += 1
+        else:
+            try:
                 result = transcriber(
                     str(audio_path),
-                    generate_kwargs=generate_kwargs,
+                    generation_config=_build_generation_config(transcriber, task, language),
                 )
-            samples.loc[samples["sample_id"].eq(sample_id), "asr_text"] = result["text"].strip()
-            samples.loc[samples["sample_id"].eq(sample_id), "run_started_at"] = started
-            samples.loc[samples["sample_id"].eq(sample_id), "run_finished_at"] = now_utc_iso()
-        except Exception as exc:  # pragma: no cover - runtime integration path
-            samples.loc[samples["sample_id"].eq(sample_id), "failure_reason"] = str(exc)
+                samples.loc[sample_mask, "asr_text"] = result["text"].strip()
+                samples.loc[sample_mask, "failure_reason"] = ""
+                completed += 1
+            except Exception as exc:  # pragma: no cover - runtime integration path
+                samples.loc[sample_mask, "failure_reason"] = str(exc)
+                status = "error"
+                failed += 1
 
-    samples = refresh_sample_status(samples)
-    save_samples(samples, out_path)
+        samples = refresh_sample_status(samples)
+        _save_samples_atomic(samples, out_path)
+
+        remaining = pending_total - current
+        print(
+            f"[{current}/{pending_total}] sample_id={sample_id} "
+            f"status={status} completed={completed} failed={failed} remaining={remaining}"
+        )
+        if status != "ok":
+            print(f"audio_path={audio_path}")
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

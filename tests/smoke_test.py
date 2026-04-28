@@ -2513,7 +2513,7 @@ def test_whisper_main_cli_overrides_yaml_asr_settings() -> None:
     )
 
 
-def test_run_whisper_batch_passes_explicit_generation_settings() -> None:
+def test_run_whisper_batch_logs_progress_and_uses_generation_config(capsys) -> None:
     with TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         audio_path = tmp / "sample.wav"
@@ -2525,35 +2525,52 @@ def test_run_whisper_batch_passes_explicit_generation_settings() -> None:
                     "audio_path": str(audio_path),
                     "asr_text": "",
                     "failure_reason": "",
+                    "run_started_at": "2026-04-27T10:00:00+00:00",
+                    "run_finished_at": "2026-04-27T10:00:05+00:00",
                     "status": "pending",
-                }
+                },
+                {
+                    "sample_id": "sample-2",
+                    "audio_path": str(audio_path),
+                    "asr_text": "ja transcrita",
+                    "failure_reason": "",
+                    "run_started_at": "2026-04-27T11:00:00+00:00",
+                    "run_finished_at": "2026-04-27T11:00:05+00:00",
+                    "status": "generated",
+                },
             ]
         )
         transcriber_calls: list[dict[str, object]] = []
 
         class DummyGenerationConfig:
             def __init__(self) -> None:
+                self.task = None
+                self.language = None
+                self.forced_decoder_ids = [(1, None)]
                 self.suppress_tokens = [1, 2, 3]
                 self.begin_suppress_tokens = [4, 5]
 
         class DummyTranscriber:
             def __init__(self) -> None:
                 self.generation_config = DummyGenerationConfig()
-                self.model = type("DummyModel", (), {"generation_config": self.generation_config})()
 
             def __call__(self, audio: str, **kwargs):
                 transcriber_calls.append({"audio": audio, **kwargs})
-                assert self.generation_config.suppress_tokens is None
-                assert self.generation_config.begin_suppress_tokens is None
                 return {"text": "texto transcrito"}
 
         saved: dict[str, object] = {}
 
         with (
-            patch("tcc_audio.whisper_batch._load_asr_pipeline", return_value=(lambda *args, **kwargs: DummyTranscriber(), -1)),
+            patch(
+                "tcc_audio.whisper_batch._load_asr_pipeline",
+                return_value=(lambda *args, **kwargs: DummyTranscriber(), types.SimpleNamespace(type="mps")),
+            ),
             patch("tcc_audio.whisper_batch.load_samples", return_value=samples.copy()),
             patch("tcc_audio.whisper_batch.refresh_sample_status", side_effect=lambda frame: frame),
-            patch("tcc_audio.whisper_batch.save_samples", side_effect=lambda frame, path: saved.update({"frame": frame.copy(), "path": path})),
+            patch(
+                "tcc_audio.whisper_batch._save_samples_atomic",
+                side_effect=lambda frame, path: saved.update({"frame": frame.copy(), "path": path}),
+            ),
         ):
             run_whisper_batch(
                 "samples.csv",
@@ -2566,19 +2583,80 @@ def test_run_whisper_batch_passes_explicit_generation_settings() -> None:
 
     assert len(transcriber_calls) == 1
     assert transcriber_calls[0]["audio"] == str(audio_path)
-    assert "generation_config" not in transcriber_calls[0]
-    assert transcriber_calls[0]["generate_kwargs"] == {
-        "task": "transcribe",
-        "language": "pt",
-        "suppress_tokens": [1, 2, 3],
-        "begin_suppress_tokens": [4, 5],
-    }
+    assert "generate_kwargs" not in transcriber_calls[0]
+    generation_config = transcriber_calls[0]["generation_config"]
+    assert generation_config.task == "transcribe"
+    assert generation_config.language == "pt"
+    assert generation_config.forced_decoder_ids is None
+    assert generation_config.suppress_tokens == [1, 2, 3]
+    assert generation_config.begin_suppress_tokens == [4, 5]
     saved_frame = saved["frame"]
     assert saved["path"] == "out.csv"
     assert saved_frame.loc[0, "asr_text"] == "texto transcrito"
+    assert saved_frame.loc[0, "run_started_at"] == "2026-04-27T10:00:00+00:00"
+    assert saved_frame.loc[0, "run_finished_at"] == "2026-04-27T10:00:05+00:00"
+    output = capsys.readouterr().out
+    assert "ASR device: MPS" in output
+    assert "ASR model: openai/whisper-small" in output
+    assert "Samples input: samples.csv" in output
+    assert "Samples output: out.csv" in output
+    assert "Rows total: 2" in output
+    assert "Rows with audio: 2" in output
+    assert "Rows already transcribed: 1" in output
+    assert "Rows pending this run: 1" in output
+    assert "[1/1] sample_id=sample-1 status=ok completed=1 failed=0 remaining=0" in output
 
 
-def test_run_whisper_batch_restores_suppression_defaults_after_call() -> None:
+def test_run_whisper_batch_saves_after_missing_audio(capsys) -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        audio_path = tmp / "missing.wav"
+        samples = pd.DataFrame(
+            [
+                {
+                    "sample_id": "sample-1",
+                    "audio_path": str(audio_path),
+                    "asr_text": "",
+                    "failure_reason": "",
+                    "run_started_at": "2026-04-27T10:00:00+00:00",
+                    "run_finished_at": "2026-04-27T10:00:05+00:00",
+                    "status": "pending",
+                }
+            ]
+        )
+        saved_frames: list[pd.DataFrame] = []
+
+        with (
+            patch(
+                "tcc_audio.whisper_batch._load_asr_pipeline",
+                return_value=(lambda *args, **kwargs: object(), -1),
+            ),
+            patch("tcc_audio.whisper_batch.load_samples", return_value=samples.copy()),
+            patch("tcc_audio.whisper_batch.refresh_sample_status", side_effect=lambda frame: frame),
+            patch(
+                "tcc_audio.whisper_batch._save_samples_atomic",
+                side_effect=lambda frame, path: saved_frames.append(frame.copy()),
+            ),
+        ):
+            run_whisper_batch(
+                "samples.csv",
+                "out.csv",
+                "openai/whisper-small",
+                only_missing=True,
+                task="transcribe",
+                language="pt",
+            )
+
+    assert len(saved_frames) == 1
+    assert saved_frames[0].loc[0, "failure_reason"] == f"missing audio: {audio_path}"
+    assert saved_frames[0].loc[0, "run_started_at"] == "2026-04-27T10:00:00+00:00"
+    assert saved_frames[0].loc[0, "run_finished_at"] == "2026-04-27T10:00:05+00:00"
+    output = capsys.readouterr().out
+    assert "[1/1] sample_id=sample-1 status=missing_audio completed=0 failed=1 remaining=0" in output
+    assert f"audio_path={audio_path}" in output
+
+
+def test_run_whisper_batch_saves_after_transcriber_error(capsys) -> None:
     with TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         audio_path = tmp / "sample.wav"
@@ -2590,31 +2668,40 @@ def test_run_whisper_batch_restores_suppression_defaults_after_call() -> None:
                     "audio_path": str(audio_path),
                     "asr_text": "",
                     "failure_reason": "",
+                    "run_started_at": "2026-04-27T10:00:00+00:00",
+                    "run_finished_at": "2026-04-27T10:00:05+00:00",
                     "status": "pending",
                 }
             ]
         )
+        saved_frames: list[pd.DataFrame] = []
 
         class DummyGenerationConfig:
             def __init__(self) -> None:
-                self.suppress_tokens = [7, 8]
-                self.begin_suppress_tokens = [9]
+                self.task = None
+                self.language = None
+                self.forced_decoder_ids = None
+                self.suppress_tokens = [1]
+                self.begin_suppress_tokens = [2]
 
         class DummyTranscriber:
             def __init__(self) -> None:
                 self.generation_config = DummyGenerationConfig()
-                self.model = type("DummyModel", (), {"generation_config": self.generation_config})()
 
             def __call__(self, audio: str, **kwargs):
-                return {"text": "texto transcrito"}
-
-        transcriber = DummyTranscriber()
+                raise RuntimeError("transcriber failed")
 
         with (
-            patch("tcc_audio.whisper_batch._load_asr_pipeline", return_value=(lambda *args, **kwargs: transcriber, -1)),
+            patch(
+                "tcc_audio.whisper_batch._load_asr_pipeline",
+                return_value=(lambda *args, **kwargs: DummyTranscriber(), -1),
+            ),
             patch("tcc_audio.whisper_batch.load_samples", return_value=samples.copy()),
             patch("tcc_audio.whisper_batch.refresh_sample_status", side_effect=lambda frame: frame),
-            patch("tcc_audio.whisper_batch.save_samples"),
+            patch(
+                "tcc_audio.whisper_batch._save_samples_atomic",
+                side_effect=lambda frame, path: saved_frames.append(frame.copy()),
+            ),
         ):
             run_whisper_batch(
                 "samples.csv",
@@ -2625,8 +2712,79 @@ def test_run_whisper_batch_restores_suppression_defaults_after_call() -> None:
                 language="pt",
             )
 
-    assert transcriber.generation_config.suppress_tokens == [7, 8]
-    assert transcriber.generation_config.begin_suppress_tokens == [9]
+    assert len(saved_frames) == 1
+    assert saved_frames[0].loc[0, "failure_reason"] == "transcriber failed"
+    assert saved_frames[0].loc[0, "run_started_at"] == "2026-04-27T10:00:00+00:00"
+    assert saved_frames[0].loc[0, "run_finished_at"] == "2026-04-27T10:00:05+00:00"
+    output = capsys.readouterr().out
+    assert "[1/1] sample_id=sample-1 status=error completed=0 failed=1 remaining=0" in output
+    assert f"audio_path={audio_path}" in output
+
+
+def test_run_whisper_batch_can_resume_from_checkpoint(capsys) -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        samples_path = tmp / "samples.csv"
+        audio_path = tmp / "sample.wav"
+        audio_path.write_bytes(b"fake-audio")
+        pd.DataFrame(
+            [
+                {
+                    "sample_id": "sample-1",
+                    "audio_path": str(audio_path),
+                    "asr_text": "",
+                    "failure_reason": "",
+                    "status": "generated",
+                }
+            ]
+        ).to_csv(samples_path, index=False)
+
+        calls: list[str] = []
+
+        class DummyGenerationConfig:
+            def __init__(self) -> None:
+                self.task = None
+                self.language = None
+                self.forced_decoder_ids = None
+                self.suppress_tokens = [1]
+                self.begin_suppress_tokens = [2]
+
+        class DummyTranscriber:
+            def __init__(self) -> None:
+                self.generation_config = DummyGenerationConfig()
+
+            def __call__(self, audio: str, **kwargs):
+                calls.append(audio)
+                return {"text": "texto transcrito"}
+
+        with patch(
+            "tcc_audio.whisper_batch._load_asr_pipeline",
+            return_value=(lambda *args, **kwargs: DummyTranscriber(), -1),
+        ):
+            run_whisper_batch(
+                samples_path,
+                samples_path,
+                "openai/whisper-small",
+                only_missing=True,
+                task="transcribe",
+                language="pt",
+            )
+            run_whisper_batch(
+                samples_path,
+                samples_path,
+                "openai/whisper-small",
+                only_missing=True,
+                task="transcribe",
+                language="pt",
+            )
+
+        saved = pd.read_csv(samples_path, dtype=str, keep_default_na=False)
+
+    assert calls == [str(audio_path)]
+    assert saved.loc[0, "asr_text"] == "texto transcrito"
+    output = capsys.readouterr().out
+    assert "Rows pending this run: 0" in output
+    assert "No pending ASR rows." in output
 
 
 def test_build_wer_arg_parser_defaults_to_optional_paths() -> None:
