@@ -203,6 +203,7 @@ Entrada:
 Saída:
 
 - embeddings usados na síntese do `SpeechT5`
+- embeddings L2-normalizados com metadado `embedding_normalization=l2`
 
 Consumido por:
 
@@ -433,7 +434,11 @@ Essa política favorece speakers com mais material útil e mantém um split simp
 
 Os embeddings extraídos aqui não são para avaliação. Eles são os vetores consumidos pelo `SpeechT5` no momento da síntese.
 
+Esses embeddings de síntese são L2-normalizados no momento da extração e normalizados novamente no carregamento, de forma idempotente, para manter o mesmo contrato no treino e na inferência.
+
 Por isso o `speaker_embedding_path` no `samples.csv` representa o embedding de síntese, não o embedding usado na métrica de similaridade.
+
+Se você tiver artefatos antigos gerados com embeddings crus, trate a migração como breaking: reextraia `artifacts/embeddings/`, recrie `run_matrix` e `samples`, e reexecute treino, síntese e métricas antes de comparar resultados.
 
 ### 6. Expandir o YAML em `run_matrix`
 

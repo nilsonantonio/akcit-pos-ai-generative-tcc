@@ -2129,7 +2129,7 @@ def test_extract_speaker_embeddings_uses_configured_tts_model() -> None:
         with patch("tcc_audio.speaker_embeddings.load_encoder_classifier", return_value=FakeEncoderClassifier):
             with patch(
                 "tcc_audio.speaker_embeddings.encode_audio_path",
-                return_value=np.zeros(512, dtype=np.float32),
+                return_value=np.arange(1, 513, dtype=np.float32),
             ):
                 frame = extract_speaker_embeddings(
                     speaker_selection_path=selection_path,
@@ -2140,7 +2140,11 @@ def test_extract_speaker_embeddings_uses_configured_tts_model() -> None:
 
         assert calls["source"] == "speechbrain/spkrec-xvect-voxceleb"
         assert int(frame.iloc[0]["embedding_dim"]) == 512
-        assert Path(frame.iloc[0]["speaker_embedding_path"]).exists()
+        assert frame.iloc[0]["embedding_normalization"] == "l2"
+        embedding_path = Path(frame.iloc[0]["speaker_embedding_path"])
+        assert embedding_path.exists()
+        saved_embedding = np.load(embedding_path)
+        assert np.isclose(np.linalg.norm(saved_embedding), 1.0, atol=1e-6)
 
 
 def test_extract_speaker_embeddings_override_wins_over_config() -> None:
@@ -2174,7 +2178,7 @@ def test_extract_speaker_embeddings_override_wins_over_config() -> None:
         with patch("tcc_audio.speaker_embeddings.load_encoder_classifier", return_value=FakeEncoderClassifier):
             with patch(
                 "tcc_audio.speaker_embeddings.encode_audio_path",
-                return_value=np.zeros(192, dtype=np.float32),
+                return_value=np.arange(1, 193, dtype=np.float32),
             ):
                 frame = extract_speaker_embeddings(
                     speaker_selection_path=selection_path,
@@ -2511,6 +2515,54 @@ def test_speecht5_dataset_normalizes_legacy_manifest_text() -> None:
     assert item["labels"].shape == (3, 80)
 
 
+def test_speecht5_dataset_preloads_speaker_embeddings_once_per_speaker() -> None:
+    from tcc_audio.speecht5_runner import _build_dataset
+
+    load_calls: list[tuple[str, int | None]] = []
+
+    def fake_load_speaker_embedding(path: str, expected_dim: int | None = None) -> np.ndarray:
+        load_calls.append((path, expected_dim))
+        return np.ones((1, 512), dtype=np.float32)
+
+    with patch(
+        "tcc_audio.speecht5_runner._load_torch_stack",
+        return_value={
+            "librosa": types.SimpleNamespace(load=lambda *args, **kwargs: (np.zeros(1600, dtype=np.float32), 16000)),
+            "Dataset": type("Dataset", (), {}),
+        },
+    ), patch(
+        "tcc_audio.speecht5_runner._load_speaker_embedding",
+        side_effect=fake_load_speaker_embedding,
+    ):
+        class FakeProcessor:
+            def __call__(self, **kwargs):
+                return {
+                    "input_ids": [1, 2, 3],
+                    "labels": np.zeros((1, 5, 80), dtype=np.float32),
+                }
+
+        frame = pd.DataFrame(
+            [
+                {
+                    "audio_path": "dummy_a.wav",
+                    "target_text": "Texto A.",
+                    "speaker_id": "speaker_01",
+                },
+                {
+                    "audio_path": "dummy_b.wav",
+                    "target_text": "Texto B.",
+                    "speaker_id": "speaker_01",
+                },
+            ]
+        )
+        DatasetClass = _build_dataset(frame, {"speaker_01": "speaker.npy"}, sample_rate=16000)
+        dataset = DatasetClass(frame, FakeProcessor())
+        _ = dataset[0]
+        _ = dataset[1]
+
+    assert load_calls == [("speaker.npy", 512)]
+
+
 def test_apply_lora_adapter_does_not_force_seq2seq_task_type() -> None:
     calls: dict[str, object] = {}
 
@@ -2705,6 +2757,39 @@ def test_speecht5_embedding_dimension_validation() -> None:
             assert "speaker_embedding_path" in str(exc)
         else:
             raise AssertionError("expected speaker embedding dimension validation to fail")
+
+
+def test_speecht5_embedding_load_normalizes_idempotently() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        raw_path = tmp / "speaker_raw.npy"
+        normalized_path = tmp / "speaker_normalized.npy"
+        raw_embedding = np.arange(1, 513, dtype=np.float32)
+        normalized_embedding = raw_embedding / np.linalg.norm(raw_embedding)
+        np.save(raw_path, raw_embedding)
+        np.save(normalized_path, normalized_embedding)
+
+        loaded_raw = _load_speaker_embedding(raw_path, expected_dim=512)
+        loaded_normalized = _load_speaker_embedding(normalized_path, expected_dim=512)
+
+    assert loaded_raw.shape == (1, 512)
+    assert loaded_normalized.shape == (1, 512)
+    assert np.isclose(np.linalg.norm(loaded_raw[0]), 1.0, atol=1e-6)
+    assert np.isclose(np.linalg.norm(loaded_normalized[0]), 1.0, atol=1e-6)
+    assert np.allclose(loaded_normalized[0], normalized_embedding, atol=1e-6)
+
+
+def test_speecht5_embedding_zero_norm_validation() -> None:
+    with TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "speaker.npy"
+        np.save(path, np.zeros(512, dtype=np.float32))
+        try:
+            _load_speaker_embedding(path, expected_dim=512)
+        except ValueError as exc:
+            assert "zero L2 norm" in str(exc)
+            assert "extract_speaker_embeddings.py" in str(exc)
+        else:
+            raise AssertionError("expected zero-norm speaker embedding validation to fail")
 
 
 def test_metric_aggregation_contract() -> None:

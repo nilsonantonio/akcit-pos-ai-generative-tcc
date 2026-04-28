@@ -28,6 +28,21 @@ from tcc_audio.speechbrain_compat import (
 )
 
 
+def _normalize_synthesis_embedding(embedding: np.ndarray, *, speaker_id: object) -> np.ndarray:
+    normalized = np.asarray(embedding, dtype=np.float32).reshape(-1)
+    if normalized.size == 0:
+        raise ValueError(f"Speaker embedding extraction produced an empty vector for {speaker_id}.")
+    norm = float(np.linalg.norm(normalized))
+    if not np.isfinite(norm):
+        raise ValueError(f"Speaker embedding extraction produced a non-finite vector for {speaker_id}.")
+    if norm == 0.0:
+        raise ValueError(
+            f"Speaker embedding extraction produced a zero-norm vector for {speaker_id}. "
+            "Pick a different reference audio or inspect the source waveform."
+        )
+    return normalized / norm
+
+
 def extract_speaker_embeddings(
     speaker_selection_path: str | Path,
     out_index: str | Path,
@@ -57,7 +72,10 @@ def extract_speaker_embeddings(
     for _, row in selection.iterrows():
         speaker_id = row["speaker_id"]
         reference_audio = Path(row["reference_audio"])
-        embedding = encode_audio_path(classifier, reference_audio)
+        embedding = _normalize_synthesis_embedding(
+            encode_audio_path(classifier, reference_audio),
+            speaker_id=speaker_id,
+        )
         if embedding.shape[0] != resolved_expected_dim:
             raise ValueError(
                 f"Embedding model '{resolved_model_name}' produced {embedding.shape[0]} dims for {speaker_id}, "
@@ -73,6 +91,7 @@ def extract_speaker_embeddings(
                 "speaker_embedding_path": str(embedding_path),
                 "embedding_model": resolved_model_name,
                 "embedding_dim": embedding.shape[0],
+                "embedding_normalization": "l2",
             }
         )
 

@@ -150,6 +150,8 @@ Extraia os embeddings de síntese:
 python3 scripts/extract_speaker_embeddings.py
 ```
 
+Os `.npy` gerados nessa etapa passam a ser L2-normalizados por contrato. Se você tiver checkpoints ou métricas produzidos com embeddings crus, reextraia `artifacts/embeddings/`, reinicialize `run_matrix` e `samples`, e reexecute treino/inferência antes de comparar runs.
+
 Gere a matriz oficial de execução:
 
 ```bash

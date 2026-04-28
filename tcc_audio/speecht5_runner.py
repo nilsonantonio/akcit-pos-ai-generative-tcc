@@ -232,8 +232,25 @@ def _resolve_gpu_hourly_rate(condition: Mapping[str, Any], cli_override: float |
 
 
 def _load_embedding(path: str | Path) -> np.ndarray:
-    embedding = np.load(path)
-    return embedding.reshape(1, -1).astype(np.float32)
+    try:
+        embedding = np.load(path)
+    except FileNotFoundError as exc:
+        raise ValueError(
+            "Speaker embedding file is missing in the SpeechT5 synthesis path: "
+            f"{path}. Reextract synthesis embeddings with `scripts/extract_speaker_embeddings.py`."
+        ) from exc
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            "Speaker embedding file is corrupted or unreadable in the SpeechT5 synthesis path: "
+            f"{path}. Reextract synthesis embeddings with `scripts/extract_speaker_embeddings.py`."
+        ) from exc
+    embedding = np.asarray(embedding, dtype=np.float32)
+    if embedding.size == 0:
+        raise ValueError(
+            "Speaker embedding file is empty in the SpeechT5 synthesis path: "
+            f"{path}. Reextract synthesis embeddings with `scripts/extract_speaker_embeddings.py`."
+        )
+    return embedding.reshape(1, -1)
 
 
 def _load_speaker_embedding(path: str | Path, expected_dim: int | None = None) -> np.ndarray:
@@ -247,6 +264,32 @@ def _load_speaker_embedding(path: str | Path, expected_dim: int | None = None) -
         if expected_dim == 512:
             message += "Regenerate TTS synthesis embeddings with 'speechbrain/spkrec-xvect-voxceleb'."
         raise ValueError(message)
+    norm = float(np.linalg.norm(embedding, ord=2))
+    if not np.isfinite(norm):
+        raise ValueError(
+            "Speaker embedding contains non-finite values in the SpeechT5 synthesis path: "
+            f"{path}. Reextract synthesis embeddings with `scripts/extract_speaker_embeddings.py`."
+        )
+    if norm == 0.0:
+        raise ValueError(
+            "Speaker embedding has zero L2 norm in the SpeechT5 synthesis path: "
+            f"{path}. Reextract synthesis embeddings with `scripts/extract_speaker_embeddings.py`."
+        )
+    return embedding / norm
+
+
+def _cached_speaker_embedding(
+    path: str | Path,
+    *,
+    expected_dim: int,
+    cache: dict[str, np.ndarray] | None = None,
+) -> np.ndarray:
+    cache_key = str(Path(path))
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+    embedding = _load_speaker_embedding(path, expected_dim=expected_dim)
+    if cache is not None:
+        cache[cache_key] = embedding
     return embedding
 
 
@@ -276,15 +319,21 @@ def generate_speech_to_file(
     speaker_embedding_path: str | Path,
     output_path: str | Path,
     sample_rate: int = 16000,
+    speaker_embedding_cache: dict[str, np.ndarray] | None = None,
 ) -> tuple[float, float]:
     torch = context.torch
     inputs = context.processor(text=text, return_tensors="pt")
     device = next(context.model.parameters()).device
     input_ids = inputs["input_ids"].to(device)
     expected_dim = int(getattr(context.model.config, "speaker_embedding_dim", 512))
-    speaker_embeddings = torch.tensor(_load_speaker_embedding(speaker_embedding_path, expected_dim=expected_dim)).to(
-        device
+    speaker_embeddings = torch.tensor(
+        _cached_speaker_embedding(
+            speaker_embedding_path,
+            expected_dim=expected_dim,
+            cache=speaker_embedding_cache,
+        )
     )
+    speaker_embeddings = speaker_embeddings.to(device)
 
     started = time.perf_counter()
     with torch.no_grad():
@@ -333,6 +382,7 @@ def run_condition_inference(
         subset = subset[subset["speaker_id"].eq(speaker_id)].copy()
     if limit:
         subset = subset.head(limit).copy()
+    speaker_embedding_cache: dict[str, np.ndarray] = {}
 
     for _, row in subset.iterrows():
         sample_id = row["sample_id"]
@@ -344,6 +394,7 @@ def run_condition_inference(
                 speaker_embedding_path=row["speaker_embedding_path"],
                 output_path=row["audio_path"],
                 sample_rate=int(config["data"].get("sample_rate", 16000)),
+                speaker_embedding_cache=speaker_embedding_cache,
             )
             sample_mask = samples["sample_id"].eq(sample_id)
             samples.loc[sample_mask, "model_name"] = row["checkpoint_label"] or row["model_name"] or condition_id
@@ -366,10 +417,27 @@ def run_condition_inference(
     return samples
 
 
-def _build_dataset(manifest: pd.DataFrame, speaker_embedding_map: dict[str, str], sample_rate: int):
+def _preload_speaker_embedding_cache(
+    speaker_embedding_map: Mapping[str, str | Path],
+    *,
+    expected_dim: int,
+) -> dict[str, np.ndarray]:
+    cache: dict[str, np.ndarray] = {}
+    for speaker_id, embedding_path in speaker_embedding_map.items():
+        cache[str(speaker_id)] = _load_speaker_embedding(embedding_path, expected_dim=expected_dim)[0]
+    return cache
+
+
+def _build_dataset(
+    manifest: pd.DataFrame,
+    speaker_embedding_map: Mapping[str, str | Path],
+    sample_rate: int,
+    expected_dim: int = 512,
+):
     stack = _load_torch_stack()
     librosa = stack["librosa"]
     Dataset = stack["Dataset"]
+    speaker_embedding_cache = _preload_speaker_embedding_cache(speaker_embedding_map, expected_dim=expected_dim)
 
     def _resolve_training_text(row: pd.Series) -> str:
         normalized_text = str(row.get("target_text_speecht5", "")).strip()
@@ -397,10 +465,7 @@ def _build_dataset(manifest: pd.DataFrame, speaker_embedding_map: dict[str, str]
             return {
                 "input_ids": processed["input_ids"],
                 "labels": processed["labels"][0],
-                "speaker_embeddings": _load_speaker_embedding(
-                    speaker_embedding_map[row["speaker_id"]],
-                    expected_dim=512,
-                )[0],
+                "speaker_embeddings": speaker_embedding_cache[str(row["speaker_id"])],
             }
 
     return SpeechT5TTSDataset
@@ -684,10 +749,21 @@ def _train_condition(
     save_samples(samples, samples_path)
 
     sample_rate = int(config["data"].get("sample_rate", 16000))
+    project_config = config.get("project", {})
+    expected_speaker_embedding_dim = (
+        int(project_config.get("tts_speaker_embedding_dim", 512))
+        if isinstance(project_config, Mapping)
+        else 512
+    )
     stack = _load_training_stack()
     processor = stack["SpeechT5Processor"].from_pretrained(config["project"]["primary_model"])
     speaker_embedding_map = _prepare_speaker_embedding_map(config["data"]["speaker_embeddings_index"])
-    dataset_class = _build_dataset(manifest, speaker_embedding_map, sample_rate)
+    dataset_class = _build_dataset(
+        manifest,
+        speaker_embedding_map,
+        sample_rate,
+        expected_dim=expected_speaker_embedding_dim,
+    )
     run_started_at = now_utc_iso()
     run_started_perf = time.perf_counter()
     training_units_total = 0
