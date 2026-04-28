@@ -12,6 +12,14 @@ from tcc_audio.cli_defaults import (
     DEFAULT_PROCESSED_METADATA_PATH,
     DEFAULT_SPEAKER_SELECTION_PATH,
 )
+from tcc_audio.dataset_filtering import (
+    DEFAULT_MAX_AUDIO_DURATION_S,
+    DEFAULT_MAX_CLIPS_PER_SPEAKER,
+    DEFAULT_MIN_AUDIO_DURATION_S,
+    DEFAULT_MIN_CLIPS_PER_SPEAKER,
+    DEFAULT_MIN_DURATION_PER_SPEAKER_S,
+    apply_training_slice_filters,
+)
 from tcc_audio.io import ensure_parent_dir, read_csv
 from tcc_audio.speecht5_text import normalize_text_for_speecht5
 
@@ -48,12 +56,23 @@ def select_speakers(
     minutes_per_speaker: int = 20,
     val_ratio: float = 0.1,
     seed: int = 42,
+    min_audio_duration_s: float = DEFAULT_MIN_AUDIO_DURATION_S,
+    max_audio_duration_s: float = DEFAULT_MAX_AUDIO_DURATION_S,
+    min_clips_per_speaker: int = DEFAULT_MIN_CLIPS_PER_SPEAKER,
+    max_clips_per_speaker: int = DEFAULT_MAX_CLIPS_PER_SPEAKER,
+    min_duration_per_speaker_s: float = DEFAULT_MIN_DURATION_PER_SPEAKER_S,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     metadata = read_csv(metadata_path)
     _validate_input(metadata)
-    metadata["duration_s"] = pd.to_numeric(metadata["duration_s"], errors="coerce")
-    metadata = metadata.dropna(subset=["duration_s"])
-    metadata = metadata[metadata["duration_s"] > 0].copy()
+    filtered = apply_training_slice_filters(
+        metadata,
+        min_audio_duration_s=min_audio_duration_s,
+        max_audio_duration_s=max_audio_duration_s,
+        min_clips_per_speaker=min_clips_per_speaker,
+        max_clips_per_speaker=max_clips_per_speaker,
+        min_duration_per_speaker_s=min_duration_per_speaker_s,
+    )
+    metadata = filtered.final_rows.copy()
 
     rng = metadata.sample(frac=1.0, random_state=seed)
     target_seconds = minutes_per_speaker * 60
@@ -150,6 +169,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--minutes-per-speaker", type=int, default=20)
     parser.add_argument("--val-ratio", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--min-audio-duration-s", type=float, default=DEFAULT_MIN_AUDIO_DURATION_S)
+    parser.add_argument("--max-audio-duration-s", type=float, default=DEFAULT_MAX_AUDIO_DURATION_S)
+    parser.add_argument("--min-clips-per-speaker", type=int, default=DEFAULT_MIN_CLIPS_PER_SPEAKER)
+    parser.add_argument("--max-clips-per-speaker", type=int, default=DEFAULT_MAX_CLIPS_PER_SPEAKER)
+    parser.add_argument("--min-duration-per-speaker-s", type=float, default=DEFAULT_MIN_DURATION_PER_SPEAKER_S)
     return parser
 
 
@@ -163,6 +187,11 @@ def main(argv: list[str] | None = None) -> int:
         minutes_per_speaker=args.minutes_per_speaker,
         val_ratio=args.val_ratio,
         seed=args.seed,
+        min_audio_duration_s=args.min_audio_duration_s,
+        max_audio_duration_s=args.max_audio_duration_s,
+        min_clips_per_speaker=args.min_clips_per_speaker,
+        max_clips_per_speaker=args.max_clips_per_speaker,
+        min_duration_per_speaker_s=args.min_duration_per_speaker_s,
     )
     print(f"Selected {speaker_selection['speaker_id'].nunique() if not speaker_selection.empty else 0} speakers")
     print(f"Wrote {len(manifest)} manifest rows")

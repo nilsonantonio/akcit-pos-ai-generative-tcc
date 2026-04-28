@@ -412,7 +412,14 @@ O áudio é convertido para um formato canônico do projeto, com organização e
 
 ### 4. Selecionar speakers e gerar o manifesto
 
-O framework ranqueia speakers globalmente por duração disponível e seleciona os primeiros `speaker_target_count`. Para cada speaker escolhido:
+Antes do ranking global, o framework aplica um recorte fixo no metadata:
+
+- mantém apenas clips com duração entre `2s` e `8s`
+- exige pelo menos `20` clips elegíveis por speaker
+- exige pelo menos `60s` totais por speaker após esse filtro
+- limita cada speaker a no máximo `120` clips, mantendo os mais longos
+
+Depois disso, ele ranqueia speakers globalmente por duração disponível e seleciona os primeiros `speaker_target_count`. Para cada speaker escolhido:
 
 - o áudio é ordenado por duração
 - clips são acumulados até o teto `minutes_per_speaker`
@@ -507,7 +514,15 @@ Na preparação de dados e no setup experimental aparecem duas noções de dura�
 - duração real de cada clip
 - teto de `minutes_per_speaker` por speaker selecionado
 
-O objetivo é manter um orçamento de adaptação comparável entre speakers sem exigir exatamente o mesmo número de clips por pessoa.
+Além disso, a curadoria compartilhada entre análise e seleção usa o recorte:
+
+- `min_audio_duration_s=2`
+- `max_audio_duration_s=8`
+- `min_clips_per_speaker=20`
+- `max_clips_per_speaker=120`
+- `min_duration_per_speaker_s=60`
+
+O objetivo é reduzir outliers, exigir cobertura mínima por speaker e manter um orçamento de adaptação comparável.
 
 ## Seleção de speakers e regras de amostragem
 

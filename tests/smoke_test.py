@@ -228,108 +228,74 @@ def _write_cleanup_config(tmp: Path) -> Path:
     return config
 
 
+def _repeated_speaker_rows(
+    source_speaker_id: str,
+    *,
+    gender: str,
+    clip_count: int,
+    duration_s: float,
+    locale: str = "pt",
+    variant: str = "pt-BR",
+    target_text: str = "Texto de teste.",
+) -> list[dict[str, str | float]]:
+    rows: list[dict[str, str | float]] = []
+    for utterance_index in range(clip_count):
+        rows.append(
+            {
+                "source_speaker_id": source_speaker_id,
+                "gender": gender,
+                "utterance_id": f"{source_speaker_id}_{utterance_index:03d}",
+                "duration_s": duration_s,
+                "audio_path": f"audio/{source_speaker_id}_{utterance_index:03d}.wav",
+                "target_text": target_text,
+                "license": "CC0",
+                "source": "common_voice_pt",
+                "locale": locale,
+                "variant": variant,
+            }
+        )
+    return rows
+
+
 def _write_dataset_slice_metadata(tmp: Path) -> Path:
     metadata = tmp / "common_voice_metadata.csv"
-    pd.DataFrame(
+    rows: list[dict[str, str | float]] = []
+    rows.extend(_repeated_speaker_rows("speaker_keep_a", gender="masculine", clip_count=25, duration_s=4.0))
+    rows.extend(_repeated_speaker_rows("speaker_cap_b", gender="", clip_count=122, duration_s=5.0, variant=""))
+    rows.extend(_repeated_speaker_rows("speaker_keep_c", gender="feminine", clip_count=20, duration_s=3.0, locale="", variant="pt-PT"))
+    rows.extend(_repeated_speaker_rows("speaker_short_d", gender="masculine", clip_count=20, duration_s=2.5))
+    rows.extend(_repeated_speaker_rows("speaker_few_e", gender="unknown", clip_count=19, duration_s=4.0))
+    rows.extend(_repeated_speaker_rows("speaker_outside_short", gender="unknown", clip_count=25, duration_s=1.5))
+    rows.extend(_repeated_speaker_rows("speaker_outside_long", gender="unknown", clip_count=25, duration_s=8.5))
+    rows.extend(
         [
             {
-                "source_speaker_id": "speaker_a",
-                "gender": "masculine",
-                "utterance_id": "utt_01",
-                "duration_s": "1.0",
-                "audio_path": "clips/utt_01.mp3",
-                "target_text": "Texto 1",
-                "license": "CC0-1.0",
-                "source": "common_voice_pt",
-                "locale": "pt",
-                "variant": "pt-BR",
-            },
-            {
-                "source_speaker_id": "speaker_a",
-                "gender": "masculine",
-                "utterance_id": "utt_02",
-                "duration_s": "3.0",
-                "audio_path": "clips/utt_02.mp3",
-                "target_text": "Texto 2",
-                "license": "CC0-1.0",
-                "source": "common_voice_pt",
-                "locale": "pt",
-                "variant": "pt-BR",
-            },
-            {
-                "source_speaker_id": "speaker_a",
-                "gender": "masculine",
-                "utterance_id": "utt_03",
-                "duration_s": "61.0",
-                "audio_path": "clips/utt_03.mp3",
-                "target_text": "Texto 3",
-                "license": "CC0-1.0",
-                "source": "common_voice_pt",
-                "locale": "pt",
-                "variant": "pt-BR",
-            },
-            {
-                "source_speaker_id": "speaker_b",
-                "gender": "",
-                "utterance_id": "utt_04",
-                "duration_s": "4.5",
-                "audio_path": "clips/utt_04.mp3",
-                "target_text": "Texto 4",
-                "license": "CC0-1.0",
-                "source": "common_voice_pt",
-                "locale": "pt",
-                "variant": "",
-            },
-            {
-                "source_speaker_id": "speaker_b",
-                "gender": "",
-                "utterance_id": "utt_05",
-                "duration_s": "605.0",
-                "audio_path": "clips/utt_05.mp3",
-                "target_text": "Texto 5",
-                "license": "CC0-1.0",
-                "source": "common_voice_pt",
-                "locale": "pt",
-                "variant": "",
-            },
-            {
-                "source_speaker_id": "speaker_c",
+                "source_speaker_id": "speaker_invalid",
                 "gender": "feminine",
-                "utterance_id": "utt_06",
-                "duration_s": "8.5",
-                "audio_path": "clips/utt_06.mp3",
-                "target_text": "Texto 6",
-                "license": "CC0-1.0",
-                "source": "common_voice_pt",
-                "locale": "",
-                "variant": "pt-PT",
-            },
-            {
-                "source_speaker_id": "speaker_d",
-                "gender": "feminine",
-                "utterance_id": "utt_07",
+                "utterance_id": "speaker_invalid_000",
                 "duration_s": "invalid",
-                "audio_path": "clips/utt_07.mp3",
-                "target_text": "Texto 7",
-                "license": "CC0-1.0",
+                "audio_path": "audio/speaker_invalid_000.wav",
+                "target_text": "Texto invalido.",
+                "license": "CC0",
                 "source": "common_voice_pt",
                 "locale": "pt",
-                "variant": "pt-PT",
+                "variant": "pt-BR",
             },
             {
-                "source_speaker_id": "speaker_e",
+                "source_speaker_id": "speaker_negative",
                 "gender": "masculine",
-                "utterance_id": "utt_08",
-                "duration_s": "-2.0",
-                "audio_path": "clips/utt_08.mp3",
-                "target_text": "Texto 8",
-                "license": "CC0-1.0",
+                "utterance_id": "speaker_negative_000",
+                "duration_s": -2.0,
+                "audio_path": "audio/speaker_negative_000.wav",
+                "target_text": "Texto negativo.",
+                "license": "CC0",
                 "source": "common_voice_pt",
                 "locale": "pt",
                 "variant": "pt-BR",
             },
         ]
-    ).to_csv(metadata, index=False)
+    )
+    pd.DataFrame(rows).to_csv(metadata, index=False)
     return metadata
 
 
@@ -455,10 +421,11 @@ def test_build_dataset_slice_analysis_arg_parser_uses_canonical_defaults() -> No
     args = parser.parse_args([])
 
     assert args.metadata == str(DEFAULT_RAW_METADATA_PATH)
-    assert args.min_seconds is None
-    assert args.max_seconds is None
-    assert args.range_seconds is None
-    assert args.top_speakers == 5
+    assert args.min_audio_duration_s == 2.0
+    assert args.max_audio_duration_s == 8.0
+    assert args.min_clips_per_speaker == 20
+    assert args.max_clips_per_speaker == 120
+    assert args.min_duration_per_speaker_s == 60.0
     assert args.json_out is None
 
 
@@ -1538,158 +1505,150 @@ def test_build_dataset_inventory_degrades_when_ffprobe_is_unavailable(monkeypatc
     assert "WARNINGS" in report
 
 
-def test_analyze_dataset_slice_filters_with_min_seconds() -> None:
+def test_analyze_dataset_slice_builds_final_recorte_summary() -> None:
     with TemporaryDirectory() as tmpdir:
         metadata = _write_dataset_slice_metadata(Path(tmpdir))
-        analysis = analyze_dataset_slice(metadata_path=metadata, min_seconds=4.5, top_speakers=2)
+        analysis = analyze_dataset_slice(metadata_path=metadata)
 
-    assert analysis["overall_totals"]["total_clips"] == 4
-    assert analysis["overall_totals"]["unique_speakers"] == 3
-    assert round(float(analysis["overall_totals"]["total_minutes"]), 3) == 11.317
-    assert analysis["speaker_thresholds"] == [
-        {"threshold_minutes": 1, "speaker_count": 2},
-        {"threshold_minutes": 5, "speaker_count": 1},
-        {"threshold_minutes": 10, "speaker_count": 1},
-        {"threshold_minutes": 20, "speaker_count": 0},
-        {"threshold_minutes": 30, "speaker_count": 0},
-    ]
-    assert analysis["speaker_concentration"]["top_n"] == 2
-    assert len(analysis["speaker_concentration"]["speakers"]) == 2
-    assert analysis["speaker_concentration"]["speakers"][0]["source_speaker_id"] == "speaker_b"
-
-
-def test_analyze_dataset_slice_filters_with_max_seconds() -> None:
-    with TemporaryDirectory() as tmpdir:
-        metadata = _write_dataset_slice_metadata(Path(tmpdir))
-        analysis = analyze_dataset_slice(metadata_path=metadata, max_seconds=4.5, top_speakers=3)
-
-    assert analysis["overall_totals"]["total_clips"] == 3
-    assert analysis["overall_totals"]["unique_speakers"] == 2
-    assert round(float(analysis["overall_totals"]["total_minutes"]), 3) == 0.142
-    assert analysis["duration_bins"][0]["clip_count"] == 1
-    assert analysis["duration_bins"][1]["clip_count"] == 1
-    assert analysis["duration_bins"][2]["clip_count"] == 1
-
-
-def test_analyze_dataset_slice_filters_with_range_seconds() -> None:
-    with TemporaryDirectory() as tmpdir:
-        metadata = _write_dataset_slice_metadata(Path(tmpdir))
-        analysis = analyze_dataset_slice(metadata_path=metadata, min_seconds=2.0, max_seconds=8.5, top_speakers=3)
-
-    assert analysis["overall_totals"]["total_clips"] == 3
-    assert analysis["overall_totals"]["unique_speakers"] == 3
-    grouped = analysis["grouped_by_locale_variant_gender"]
-    assert grouped == [
+    assert analysis["steps"]["clip_filter"] == {
+        "total_clips": 206,
+        "total_duration_s": 896.0,
+        "total_minutes": 14.933333333333334,
+        "unique_speakers": 5,
+    }
+    assert analysis["steps"]["speaker_eligibility"] == {
+        "candidate_speakers": 5,
+        "eligible_speakers": 3,
+        "excluded_speakers": 2,
+        "excluded_by_min_clips": 1,
+        "excluded_by_min_duration": 1,
+    }
+    assert analysis["steps"]["clip_cap"] == {
+        "max_clips_per_speaker": 120,
+        "capped_speakers": 1,
+    }
+    assert analysis["final_dataset"] == {
+        "total_clips": 165,
+        "total_duration_s": 760.0,
+        "total_minutes": 12.666666666666666,
+        "unique_speakers": 3,
+    }
+    assert analysis["grouped_by_locale_variant_gender"] == [
         {
             "locale": "pt",
             "variant": "pt-BR",
             "gender": "masculine",
-            "clip_count": 1,
-            "total_duration_s": 3.0,
-            "total_minutes": 0.05,
+            "clip_count": 25,
+            "total_duration_s": 100.0,
+            "total_minutes": 1.6666666666666667,
             "unique_speakers": 1,
         },
         {
             "locale": "pt",
             "variant": "unknown",
             "gender": "unknown",
-            "clip_count": 1,
-            "total_duration_s": 4.5,
-            "total_minutes": 0.075,
+            "clip_count": 120,
+            "total_duration_s": 600.0,
+            "total_minutes": 10.0,
             "unique_speakers": 1,
         },
         {
             "locale": "unknown",
             "variant": "pt-PT",
             "gender": "feminine",
-            "clip_count": 1,
-            "total_duration_s": 8.5,
-            "total_minutes": 0.14166666666666666,
+            "clip_count": 20,
+            "total_duration_s": 60.0,
+            "total_minutes": 1.0,
             "unique_speakers": 1,
         },
     ]
-    assert analysis["per_variant_gender"] == [
-        {
-            "variant": "pt-BR",
-            "gender": "masculine",
-            "clip_count": 1,
-            "total_duration_s": 3.0,
-            "total_minutes": 0.05,
-            "unique_speakers": 1,
-        },
-        {
-            "variant": "pt-PT",
-            "gender": "feminine",
-            "clip_count": 1,
-            "total_duration_s": 8.5,
-            "total_minutes": 0.14166666666666666,
-            "unique_speakers": 1,
-        },
-        {
-            "variant": "unknown",
-            "gender": "unknown",
-            "clip_count": 1,
-            "total_duration_s": 4.5,
-            "total_minutes": 0.075,
-            "unique_speakers": 1,
-        },
-    ]
-    assert analysis["duration_summary"]["min_s"] == 3.0
-    assert analysis["duration_summary"]["max_s"] == 8.5
-    assert round(float(analysis["duration_summary"]["median_s"]), 3) == 4.5
+    assert analysis["speaker_distribution"]["clips_per_speaker"] == {
+        "min": 20.0,
+        "p25": 22.5,
+        "median": 25.0,
+        "p75": 72.5,
+        "p90": 101.0,
+        "max": 120.0,
+    }
+    assert analysis["speaker_distribution"]["duration_per_speaker_s"] == {
+        "min": 60.0,
+        "p25": 80.0,
+        "median": 100.0,
+        "p75": 350.0,
+        "p90": 500.0,
+        "max": 600.0,
+    }
+    assert analysis["speaker_stats"][0]["source_speaker_id"] == "speaker_cap_b"
+    assert analysis["speaker_stats"][0]["clip_count"] == 120
 
 
-def test_dataset_slice_analysis_main_rejects_invalid_range_combination() -> None:
+def test_analyze_dataset_slice_respects_custom_clip_and_speaker_thresholds() -> None:
+    with TemporaryDirectory() as tmpdir:
+        metadata = _write_dataset_slice_metadata(Path(tmpdir))
+        analysis = analyze_dataset_slice(
+            metadata_path=metadata,
+            min_audio_duration_s=4.0,
+            max_audio_duration_s=5.0,
+            min_clips_per_speaker=20,
+            max_clips_per_speaker=30,
+            min_duration_per_speaker_s=90.0,
+        )
+
+    assert analysis["steps"]["clip_filter"]["total_clips"] == 166
+    assert analysis["steps"]["clip_filter"]["total_minutes"] == 13.1
+    assert analysis["steps"]["clip_filter"]["unique_speakers"] == 3
+    assert analysis["steps"]["speaker_eligibility"]["eligible_speakers"] == 2
+    assert analysis["steps"]["clip_cap"]["capped_speakers"] == 1
+    assert analysis["final_dataset"] == {
+        "total_clips": 55,
+        "total_duration_s": 250.0,
+        "total_minutes": 4.166666666666667,
+        "unique_speakers": 2,
+    }
+
+
+def test_analyze_dataset_slice_rejects_invalid_audio_duration_bounds() -> None:
     with TemporaryDirectory() as tmpdir:
         metadata = _write_dataset_slice_metadata(Path(tmpdir))
         try:
-            dataset_slice_analysis_main(
-                [
-                    "--metadata",
-                    str(metadata),
-                    "--min-seconds",
-                    "2.0",
-                    "--range-seconds",
-                    "2.0",
-                    "8.0",
-                ]
-            )
-        except SystemExit as exc:
-            message = str(exc)
-        else:
-            raise AssertionError("Expected invalid range combination to raise SystemExit.")
-
-    assert "--range-seconds cannot be combined" in message
-
-
-def test_analyze_dataset_slice_rejects_when_min_seconds_exceeds_max_seconds() -> None:
-    with TemporaryDirectory() as tmpdir:
-        metadata = _write_dataset_slice_metadata(Path(tmpdir))
-        try:
-            analyze_dataset_slice(metadata_path=metadata, min_seconds=5.0, max_seconds=2.0)
+            analyze_dataset_slice(metadata_path=metadata, min_audio_duration_s=8.0, max_audio_duration_s=2.0)
         except ValueError as exc:
             message = str(exc)
         else:
-            raise AssertionError("Expected invalid min/max bounds to raise ValueError.")
+            raise AssertionError("Expected invalid audio duration bounds to raise ValueError.")
 
-    assert "min_seconds must be <= max_seconds" in message
+    assert "min_audio_duration_s must be <= max_audio_duration_s" in message
+
+
+def test_analyze_dataset_slice_rejects_invalid_clip_bounds() -> None:
+    with TemporaryDirectory() as tmpdir:
+        metadata = _write_dataset_slice_metadata(Path(tmpdir))
+        try:
+            analyze_dataset_slice(metadata_path=metadata, min_clips_per_speaker=121, max_clips_per_speaker=120)
+        except ValueError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("Expected invalid clip bounds to raise ValueError.")
+
+    assert "min_clips_per_speaker must be <= max_clips_per_speaker" in message
 
 
 def test_analyze_dataset_slice_handles_empty_result_and_warnings() -> None:
     with TemporaryDirectory() as tmpdir:
         metadata = _write_dataset_slice_metadata(Path(tmpdir))
-        analysis = analyze_dataset_slice(metadata_path=metadata, min_seconds=700.0, top_speakers=2)
+        analysis = analyze_dataset_slice(metadata_path=metadata, min_audio_duration_s=7.0, max_audio_duration_s=7.5)
         report = render_dataset_slice_analysis(analysis)
 
-    assert analysis["overall_totals"] == {
+    assert analysis["final_dataset"] == {
         "total_clips": 0,
         "total_duration_s": 0.0,
         "total_minutes": 0.0,
         "unique_speakers": 0,
     }
-    assert analysis["duration_summary"]["min_s"] is None
     assert analysis["grouped_by_locale_variant_gender"] == []
-    assert all(row["clip_count"] == 0 for row in analysis["duration_bins"])
+    assert analysis["speaker_distribution"]["clips_per_speaker"]["min"] is None
+    assert "STEP 1 CLIP FILTER" in report
+    assert "FINAL DATASET" in report
     assert "WARNINGS" in report
     assert "Discarded 1 rows with invalid duration_s." in report
     assert "Discarded 1 rows with negative duration_s." in report
@@ -1705,11 +1664,8 @@ def test_dataset_slice_analysis_main_renders_and_writes_json(capsys) -> None:
             [
                 "--metadata",
                 str(metadata),
-                "--range-seconds",
-                "2.0",
-                "8.5",
-                "--top-speakers",
-                "2",
+                "--max-clips-per-speaker",
+                "30",
                 "--json-out",
                 str(json_out),
             ]
@@ -1718,36 +1674,39 @@ def test_dataset_slice_analysis_main_renders_and_writes_json(capsys) -> None:
         saved = json.loads(json_out.read_text(encoding="utf-8"))
 
     assert exit_code == 0
-    assert "DATASET SLICE ANALYSIS" in output
-    assert "grouped_by_locale_variant_gender:" in output
-    assert "speaker_concentration:" in output
+    assert "DATASET FINAL SLICE" in output
+    assert "FILTERS" in output
+    assert "STEP 3 CLIP CAP" in output
+    assert "GROUPED BY locale / variant / gender" in output
+    assert "SPEAKER DISTRIBUTION" in output
+    assert "speaker_concentration" not in output
     assert f"Wrote JSON analysis to {json_out}" in output
-    assert saved["overall_totals"]["total_clips"] == 3
-    assert saved["speaker_concentration"]["top_n"] == 2
+    assert saved["steps"]["clip_cap"]["max_clips_per_speaker"] == 30
+    assert saved["final_dataset"]["total_clips"] == 75
 
 
 def test_speaker_selection_from_processed_metadata() -> None:
     with TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         rows = []
-        for speaker_index in range(6):
-            source_speaker_id = f"speaker_{speaker_index}"
-            gender = "unknown" if speaker_index < 4 else "feminine"
-            utterance_duration = 150 - (speaker_index * 10)
-            for utterance_index in range(12):
-                rows.append(
-                    {
-                        "source_speaker_id": source_speaker_id,
-                        "gender": gender,
-                        "utterance_id": f"{source_speaker_id}_{utterance_index}",
-                        "duration_s": utterance_duration,
-                        "audio_path": f"audio/{source_speaker_id}_{utterance_index}.wav",
-                        "target_text": 'Ação de teste com “aspas” para seleção de speaker.',
-                        "license": "CC0",
-                        "source": "common_voice_pt",
-                        "locale": "pt",
-                    }
+        speaker_specs = [
+            ("speaker_0", "unknown", 24, 7.0),
+            ("speaker_1", "unknown", 24, 6.5),
+            ("speaker_2", "unknown", 24, 6.0),
+            ("speaker_3", "unknown", 24, 5.5),
+            ("speaker_4", "feminine", 24, 5.0),
+            ("speaker_5", "feminine", 24, 4.5),
+        ]
+        for source_speaker_id, gender, clip_count, duration_s in speaker_specs:
+            rows.extend(
+                _repeated_speaker_rows(
+                    source_speaker_id,
+                    gender=gender,
+                    clip_count=clip_count,
+                    duration_s=duration_s,
+                    target_text='Ação de teste com “aspas” para seleção de speaker.',
                 )
+            )
         metadata = tmp / "metadata.csv"
         pd.DataFrame(rows).to_csv(metadata, index=False)
         manifest, speaker_selection = select_speakers(
@@ -1788,26 +1747,17 @@ def test_speaker_selection_includes_shorter_speakers_when_ranked_globally() -> N
         tmp = Path(tmpdir)
         rows = []
         speaker_specs = [
-            ("speaker_a", "unknown", [400, 350, 300, 250]),
-            ("speaker_b", "unknown", [390, 340, 290, 240]),
-            ("speaker_c", "masculine", [380, 330]),
-            ("speaker_d", "feminine", [370, 320]),
-            ("speaker_e", "feminine", [100, 90]),
+            ("speaker_a", "unknown", 40, 6.0),
+            ("speaker_b", "unknown", 35, 5.0),
+            ("speaker_c", "masculine", 25, 4.0),
+            ("speaker_d", "feminine", 20, 3.0),
+            ("speaker_e", "feminine", 21, 2.5),
+            ("speaker_f", "unknown", 30, 1.5),
         ]
-        for source_speaker_id, gender, durations in speaker_specs:
-            for utterance_index, duration_s in enumerate(durations):
-                rows.append(
-                    {
-                        "source_speaker_id": source_speaker_id,
-                        "gender": gender,
-                        "utterance_id": f"{source_speaker_id}_{utterance_index}",
-                        "duration_s": duration_s,
-                        "audio_path": f"audio/{source_speaker_id}_{utterance_index}.wav",
-                        "target_text": "Texto de teste.",
-                        "license": "CC0",
-                        "source": "common_voice_pt",
-                    }
-                )
+        for source_speaker_id, gender, clip_count, duration_s in speaker_specs:
+            rows.extend(
+                _repeated_speaker_rows(source_speaker_id, gender=gender, clip_count=clip_count, duration_s=duration_s)
+            )
         metadata = tmp / "metadata.csv"
         pd.DataFrame(rows).to_csv(metadata, index=False)
 
@@ -1825,37 +1775,18 @@ def test_speaker_selection_includes_shorter_speakers_when_ranked_globally() -> N
             "speaker_c",
             "speaker_d",
         ]
-        shorter = speaker_selection[speaker_selection["source_speaker_id"].eq("speaker_c")].iloc[0]
+        shorter = speaker_selection[speaker_selection["source_speaker_id"].eq("speaker_d")].iloc[0]
         assert float(shorter["total_duration_s"]) < 20 * 60
-        assert float(shorter["selected_train_duration_s"]) + float(shorter["selected_val_duration_s"]) == 710.0
+        assert float(shorter["selected_train_duration_s"]) + float(shorter["selected_val_duration_s"]) == 60.0
         assert manifest["speaker_id"].nunique() == 4
 
 
-def test_speaker_selection_assigns_single_selected_clip_to_train() -> None:
+def test_speaker_selection_caps_eligible_speaker_before_manifest_build() -> None:
     with TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
-        rows = [
-            {
-                "source_speaker_id": "speaker_a",
-                "gender": "unknown",
-                "utterance_id": "speaker_a_0",
-                "duration_s": 600,
-                "audio_path": "audio/speaker_a_0.wav",
-                "target_text": "Texto de teste.",
-                "license": "CC0",
-                "source": "common_voice_pt",
-            },
-            {
-                "source_speaker_id": "speaker_b",
-                "gender": "feminine",
-                "utterance_id": "speaker_b_0",
-                "duration_s": 590,
-                "audio_path": "audio/speaker_b_0.wav",
-                "target_text": "Outro texto.",
-                "license": "CC0",
-                "source": "common_voice_pt",
-            },
-        ]
+        rows = []
+        rows.extend(_repeated_speaker_rows("speaker_a", gender="unknown", clip_count=130, duration_s=5.0))
+        rows.extend(_repeated_speaker_rows("speaker_b", gender="feminine", clip_count=25, duration_s=4.0))
         metadata = tmp / "metadata.csv"
         pd.DataFrame(rows).to_csv(metadata, index=False)
 
@@ -1867,11 +1798,12 @@ def test_speaker_selection_assigns_single_selected_clip_to_train() -> None:
             minutes_per_speaker=20,
         )
 
-    assert manifest["speaker_id"].nunique() == 2
-    assert set(manifest["split"]) == {"train"}
-    assert not manifest.groupby("speaker_id")["split"].apply(lambda values: (values == "train").any()).eq(False).any()
-    assert (speaker_selection["selected_train_duration_s"].astype(float) > 0).all()
-    assert (speaker_selection["selected_val_duration_s"].astype(float) == 0.0).all()
+    speaker_a_selection = speaker_selection[speaker_selection["source_speaker_id"].eq("speaker_a")].iloc[0]
+    speaker_a_manifest_rows = manifest[manifest["speaker_id"].eq(speaker_a_selection["speaker_id"])]
+    assert len(speaker_a_manifest_rows) == 120
+    assert float(speaker_a_selection["total_duration_s"]) == 600.0
+    assert float(speaker_a_selection["selected_train_duration_s"]) == 540.0
+    assert float(speaker_a_selection["selected_val_duration_s"]) == 60.0
 
 
 def test_speaker_selection_handles_unknown_majority_without_gender_buckets() -> None:
@@ -1879,27 +1811,17 @@ def test_speaker_selection_handles_unknown_majority_without_gender_buckets() -> 
         tmp = Path(tmpdir)
         rows = []
         speaker_specs = [
-            ("speaker_unknown_1", "unknown", 180),
-            ("speaker_unknown_2", "unknown", 170),
-            ("speaker_unknown_3", "unknown", 160),
-            ("speaker_unknown_4", "unknown", 150),
-            ("speaker_unknown_5", "unknown", 140),
-            ("speaker_f", "feminine", 100),
+            ("speaker_unknown_1", "unknown", 25, 7.0),
+            ("speaker_unknown_2", "unknown", 25, 6.5),
+            ("speaker_unknown_3", "unknown", 25, 6.0),
+            ("speaker_unknown_4", "unknown", 25, 5.5),
+            ("speaker_unknown_5", "unknown", 25, 5.0),
+            ("speaker_f", "feminine", 25, 4.0),
         ]
-        for source_speaker_id, gender, duration_s in speaker_specs:
-            for utterance_index in range(8):
-                rows.append(
-                    {
-                        "source_speaker_id": source_speaker_id,
-                        "gender": gender,
-                        "utterance_id": f"{source_speaker_id}_{utterance_index}",
-                        "duration_s": duration_s,
-                        "audio_path": f"audio/{source_speaker_id}_{utterance_index}.wav",
-                        "target_text": "Texto de teste.",
-                        "license": "CC0",
-                        "source": "common_voice_pt",
-                    }
-                )
+        for source_speaker_id, gender, clip_count, duration_s in speaker_specs:
+            rows.extend(
+                _repeated_speaker_rows(source_speaker_id, gender=gender, clip_count=clip_count, duration_s=duration_s)
+            )
         metadata = tmp / "metadata.csv"
         pd.DataFrame(rows).to_csv(metadata, index=False)
 
