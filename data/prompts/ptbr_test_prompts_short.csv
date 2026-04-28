@@ -1,0 +1,7 @@
+prompt_id,category,raw_text,normalized_text,include_prompt_subexperiment,include_commercial_subset,notes
+P002,numeros,"Em 2025, a taxa caiu de 12,5% para 9,8%.","Em dois mil e vinte e cinco, a taxa caiu de doze virgula cinco por cento para nove virgula oito por cento.",true,true,"Ano, porcentagens e decimais."
+P005,abreviacoes,"O Dr. Silva atende na Av. Paulista, no apto. 1203.","O doutor Silva atende na avenida Paulista, no apartamento mil duzentos e tres.",true,true,"Abreviacoes comuns."
+P009,homografos,"Eu preciso levar a colher para colher as ervas.","Eu preciso levar a colher para colher as ervas.",false,true,"Homografo heterofono: substantivo/verbo."
+P013,neutras,"A equipe validou os dados antes de iniciar os experimentos.","A equipe validou os dados antes de iniciar os experimentos.",false,true,"Frase neutra do dominio do TCC."
+P017,interrogativas,"Voce confirmou se o arquivo de audio esta correto?","Voce confirmou se o arquivo de audio esta correto?",false,true,"Interrogativa direta."
+P021,expressivas,"Que otima noticia, o treinamento terminou sem erros!","Que otima noticia, o treinamento terminou sem erros!",false,true,"Expressividade positiva."
