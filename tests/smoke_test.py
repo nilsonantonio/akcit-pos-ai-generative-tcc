@@ -257,6 +257,14 @@ def _repeated_speaker_rows(
     return rows
 
 
+def _write_speaker_selection_csv(path: Path, speaker_ids: list[str]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(
+        [{"speaker_id": speaker_id, "reference_audio": f"audio/{speaker_id}.wav"} for speaker_id in speaker_ids]
+    ).to_csv(path, index=False)
+    return path
+
+
 def _write_dataset_slice_metadata(tmp: Path) -> Path:
     metadata = tmp / "common_voice_metadata.csv"
     rows: list[dict[str, str | float]] = []
@@ -522,8 +530,40 @@ def test_build_samples_arg_parser_defaults_to_optional_paths() -> None:
 
 def test_run_matrix_generation() -> None:
     with TemporaryDirectory() as tmpdir:
-        out = Path(tmpdir) / "run_matrix.csv"
-        matrix = generate_run_matrix(ROOT / "configs/speecht5_minimal.yaml", out)
+        tmp = Path(tmpdir)
+        out = tmp / "run_matrix.csv"
+        speaker_selection_config = _write_speaker_selection_csv(
+            tmp / "speaker_selection.csv",
+            [f"speaker_{index:02d}" for index in range(1, 5)],
+        )
+        config = tmp / "config.yaml"
+        config.write_text(
+            "project:\n"
+            "  seed: 42\n"
+            "data:\n"
+            f"  prompts_path: {ROOT / 'data/prompts/ptbr_test_prompts.csv'}\n"
+            f"  speaker_selection_path: {speaker_selection_config}\n"
+            "  sample_rate: 16000\n"
+            "conditions:\n"
+            "  - id: speecht5_lora_conservative\n"
+            "    label: SpeechT5 LoRA Conservative\n"
+            "    train_strategy: lora\n"
+            "    normalization_modes: [normalized]\n"
+            "    training:\n"
+            "      scope: per_speaker\n"
+            "    lora:\n"
+            "      r: 16\n"
+            "  - id: speecht5_lora_unique\n"
+            "    label: SpeechT5 LoRA Unique\n"
+            "    train_strategy: lora\n"
+            "    normalization_modes: [normalized]\n"
+            "    training:\n"
+            "      scope: unique\n"
+            "    lora:\n"
+            "      r: 8\n",
+            encoding="utf-8",
+        )
+        matrix = generate_run_matrix(config, out)
         assert out.exists()
         assert set(matrix["condition"]) == {
             "speecht5_lora_conservative",
@@ -531,8 +571,9 @@ def test_run_matrix_generation() -> None:
         }
         assert set(matrix["training_scope"]) == {"per_speaker", "unique"}
         assert len(matrix) == 192
-        speaker_selection = Path(tmpdir) / "speaker_selection.csv"
-        embeddings = Path(tmpdir) / "speaker_embeddings.csv"
+        assert "minutes_per_speaker" not in matrix.columns
+        speaker_selection = tmp / "speaker_selection.csv"
+        embeddings = tmp / "speaker_embeddings.csv"
         pd.DataFrame(
             [
                 {
@@ -569,6 +610,7 @@ def test_lora_run_matrix_supports_raw_and_normalized_modes() -> None:
     with TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         prompts = tmp / "prompts.csv"
+        speaker_selection = _write_speaker_selection_csv(tmp / "speaker_selection.csv", ["speaker_01"])
         config = tmp / "config.yaml"
         prompts.write_text(
             "prompt_id,category,raw_text,normalized_text,include_prompt_subexperiment,include_commercial_subset\n"
@@ -580,7 +622,7 @@ def test_lora_run_matrix_supports_raw_and_normalized_modes() -> None:
             "  seed: 42\n"
             "data:\n"
             "  prompts_path: " + str(prompts) + "\n"
-            "  speaker_target_count: 1\n"
+            "  speaker_selection_path: " + str(speaker_selection) + "\n"
             "conditions:\n"
             "  - id: lora_text_modes\n"
             "    label: LoRA Text Modes\n"
@@ -597,6 +639,195 @@ def test_lora_run_matrix_supports_raw_and_normalized_modes() -> None:
     assert len(matrix) == 2
     assert set(matrix["text_variant"]) == {"raw", "normalized"}
     assert set(matrix["condition"]) == {"lora_text_modes"}
+
+
+def test_run_matrix_uses_real_speaker_order_and_subset_count() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        prompts = tmp / "prompts.csv"
+        speaker_selection = _write_speaker_selection_csv(
+            tmp / "speaker_selection.csv",
+            ["speaker_03", "speaker_01", "speaker_02"],
+        )
+        config = tmp / "config.yaml"
+        prompts.write_text(
+            "prompt_id,category,raw_text,normalized_text,include_prompt_subexperiment,include_commercial_subset\n"
+            "P001,general,\"Texto cru\",\"Texto normalizado\",true,true\n",
+            encoding="utf-8",
+        )
+        config.write_text(
+            "project:\n"
+            "  seed: 42\n"
+            "data:\n"
+            f"  prompts_path: {prompts}\n"
+            f"  speaker_selection_path: {speaker_selection}\n"
+            "conditions:\n"
+            "  - id: cond_subset\n"
+            "    label: Cond Subset\n"
+            "    train_strategy: lora\n"
+            "    speaker_subset_count: 2\n"
+            "    normalization_modes: [normalized]\n"
+            "    training:\n"
+            "      scope: per_speaker\n"
+            "    lora:\n"
+            "      r: 8\n",
+            encoding="utf-8",
+        )
+
+        matrix = generate_run_matrix(config)
+
+    assert matrix["speaker_id"].tolist() == ["speaker_03", "speaker_01"]
+
+
+def test_run_matrix_fails_when_speaker_subset_exceeds_available_speakers() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        prompts = tmp / "prompts.csv"
+        speaker_selection = _write_speaker_selection_csv(tmp / "speaker_selection.csv", ["speaker_01", "speaker_02"])
+        config = tmp / "config.yaml"
+        prompts.write_text(
+            "prompt_id,category,raw_text,normalized_text,include_prompt_subexperiment,include_commercial_subset\n"
+            "P001,general,\"Texto cru\",\"Texto normalizado\",true,true\n",
+            encoding="utf-8",
+        )
+        config.write_text(
+            "project:\n"
+            "  seed: 42\n"
+            "data:\n"
+            f"  prompts_path: {prompts}\n"
+            f"  speaker_selection_path: {speaker_selection}\n"
+            "conditions:\n"
+            "  - id: cond_subset_overflow\n"
+            "    train_strategy: lora\n"
+            "    speaker_subset_count: 3\n"
+            "    training:\n"
+            "      scope: unique\n"
+            "    lora:\n"
+            "      r: 8\n",
+            encoding="utf-8",
+        )
+
+        try:
+            generate_run_matrix(config)
+        except ValueError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("Expected speaker_subset_count overflow to raise ValueError.")
+
+    assert "speaker_subset_count=3" in message
+    assert "only 2 speakers are available" in message
+
+
+def test_run_matrix_fails_when_speaker_selection_file_is_missing() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        prompts = tmp / "prompts.csv"
+        config = tmp / "config.yaml"
+        prompts.write_text(
+            "prompt_id,category,raw_text,normalized_text,include_prompt_subexperiment,include_commercial_subset\n"
+            "P001,general,\"Texto cru\",\"Texto normalizado\",true,true\n",
+            encoding="utf-8",
+        )
+        config.write_text(
+            "project:\n"
+            "  seed: 42\n"
+            "data:\n"
+            f"  prompts_path: {prompts}\n"
+            f"  speaker_selection_path: {tmp / 'missing.csv'}\n"
+            "conditions:\n"
+            "  - id: cond_missing\n"
+            "    train_strategy: lora\n"
+            "    training:\n"
+            "      scope: unique\n"
+            "    lora:\n"
+            "      r: 8\n",
+            encoding="utf-8",
+        )
+
+        try:
+            generate_run_matrix(config)
+        except ValueError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("Expected missing speaker selection file to raise ValueError.")
+
+    assert "Speaker selection file not found" in message
+
+
+def test_run_matrix_fails_when_speaker_selection_lacks_speaker_id() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        prompts = tmp / "prompts.csv"
+        speaker_selection = tmp / "speaker_selection.csv"
+        config = tmp / "config.yaml"
+        prompts.write_text(
+            "prompt_id,category,raw_text,normalized_text,include_prompt_subexperiment,include_commercial_subset\n"
+            "P001,general,\"Texto cru\",\"Texto normalizado\",true,true\n",
+            encoding="utf-8",
+        )
+        pd.DataFrame([{"speaker": "speaker_01"}]).to_csv(speaker_selection, index=False)
+        config.write_text(
+            "project:\n"
+            "  seed: 42\n"
+            "data:\n"
+            f"  prompts_path: {prompts}\n"
+            f"  speaker_selection_path: {speaker_selection}\n"
+            "conditions:\n"
+            "  - id: cond_bad_speakers\n"
+            "    train_strategy: lora\n"
+            "    training:\n"
+            "      scope: unique\n"
+            "    lora:\n"
+            "      r: 8\n",
+            encoding="utf-8",
+        )
+
+        try:
+            generate_run_matrix(config)
+        except ValueError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("Expected missing speaker_id column to raise ValueError.")
+
+    assert "speaker_selection.csv must contain speaker_id" in message
+
+
+def test_run_matrix_fails_when_speaker_selection_is_empty() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        prompts = tmp / "prompts.csv"
+        speaker_selection = tmp / "speaker_selection.csv"
+        config = tmp / "config.yaml"
+        prompts.write_text(
+            "prompt_id,category,raw_text,normalized_text,include_prompt_subexperiment,include_commercial_subset\n"
+            "P001,general,\"Texto cru\",\"Texto normalizado\",true,true\n",
+            encoding="utf-8",
+        )
+        pd.DataFrame([{"speaker_id": ""}]).to_csv(speaker_selection, index=False)
+        config.write_text(
+            "project:\n"
+            "  seed: 42\n"
+            "data:\n"
+            f"  prompts_path: {prompts}\n"
+            f"  speaker_selection_path: {speaker_selection}\n"
+            "conditions:\n"
+            "  - id: cond_empty_speakers\n"
+            "    train_strategy: lora\n"
+            "    training:\n"
+            "      scope: unique\n"
+            "    lora:\n"
+            "      r: 8\n",
+            encoding="utf-8",
+        )
+
+        try:
+            generate_run_matrix(config)
+        except ValueError as exc:
+            message = str(exc)
+        else:
+            raise AssertionError("Expected empty speaker selection to raise ValueError.")
+
+    assert "No speaker_id rows found" in message
 
 
 def test_materialize_checkpoint_samples_expands_rows_per_checkpoint() -> None:

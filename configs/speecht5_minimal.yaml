@@ -12,12 +12,7 @@ project:
 data:
   adaptation_dataset: common_voice_pt
   contextual_dataset: brspeech_df
-  speaker_target_count: 4
-  minutes_per_speaker: 20
   sample_rate: 16000
-  reference_clip_len_s:
-    min: 3
-    max: 10
   prompts_path: data/prompts/ptbr_test_prompts.csv
   manifest_path: data/manifests/data_manifest.csv
   speaker_selection_path: data/manifests/speaker_selection.csv
@@ -29,7 +24,6 @@ conditions:
     regime: light_finetune
     model_name: microsoft/speecht5_tts
     trainable: true
-    minutes_per_speaker: 20
     train_strategy: lora
     uses_speaker_embeddings: true
     normalization_modes: [normalized]
@@ -71,7 +65,6 @@ conditions:
     regime: light_finetune
     model_name: microsoft/speecht5_tts
     trainable: true
-    minutes_per_speaker: 20
     train_strategy: lora
     uses_speaker_embeddings: true
     normalization_modes: [normalized]

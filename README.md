@@ -70,7 +70,7 @@ Na prática, isso significa:
 Uma distinção importante:
 
 - `select_speakers.py --speaker-target-count` controla a curadoria e o tamanho do subconjunto selecionado para o manifesto
-- `data.speaker_target_count` no YAML controla quantos `speaker_XX` entram no desenho consumido por `run_matrix.csv`
+- `speaker_selection.csv` controla quais `speaker_XX` entram no desenho consumido por `run_matrix.csv`
 
 ## O que este repositório é
 
@@ -419,10 +419,10 @@ Antes do ranking global, o framework aplica um recorte fixo no metadata:
 - exige pelo menos `60s` totais por speaker após esse filtro
 - limita cada speaker a no máximo `120` clips, mantendo os mais longos
 
-Depois disso, ele ranqueia speakers globalmente por duração disponível e seleciona os primeiros `speaker_target_count`. Para cada speaker escolhido:
+Depois disso, ele ranqueia speakers globalmente por duração disponível e seleciona os speakers que entram no `speaker_selection.csv`. Para cada speaker escolhido:
 
 - o áudio é ordenado por duração
-- clips são acumulados até o teto `minutes_per_speaker`
+- clips são acumulados até o teto passado para `select_speakers.py`
 - um subconjunto pequeno vira `val`
 - o restante vira `train`
 - o clip de referência é o primeiro selecionado, isto é, o de maior duração dentro do subconjunto escolhido
@@ -512,7 +512,7 @@ Além disso, ele descarta durações inválidas e exige caminhos de áudio consi
 Na preparação de dados e no setup experimental aparecem duas noções de duração:
 
 - duração real de cada clip
-- teto de `minutes_per_speaker` por speaker selecionado
+- teto de áudio acumulado por speaker na etapa `select_speakers.py`
 
 Além disso, a curadoria compartilhada entre análise e seleção usa o recorte:
 
@@ -526,13 +526,13 @@ O objetivo é reduzir outliers, exigir cobertura mínima por speaker e manter um
 
 ## Seleção de speakers e regras de amostragem
 
-### `speaker_target_count`
+### `speaker_selection.csv`
 
-Define quantos speakers entram no experimento. No config oficial, esse valor é `4`.
+Define quais `speaker_id` entram no experimento e em qual ordem eles são consumidos pelo `run_matrix.csv`.
 
 ### `minutes_per_speaker`
 
-Funciona como teto de áudio acumulado por speaker. Ele não exige que um speaker tenha esse total disponível; speakers com menos minutos continuam elegíveis.
+Continua existindo apenas na etapa `select_speakers.py`, como teto de áudio acumulado por speaker durante a curadoria do manifesto. Ele não faz mais parte do YAML experimental.
 
 ### Seleção global
 

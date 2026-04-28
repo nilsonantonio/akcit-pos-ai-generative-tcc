@@ -87,7 +87,7 @@ Selecione os speakers da curadoria e gere o manifesto:
 python3 scripts/select_speakers.py --speaker-target-count 1000
 ```
 
-Esse parâmetro controla a curadoria dos speakers selecionados para o manifesto. Ele é diferente de `data.speaker_target_count` no YAML, que controla quantos `speaker_XX` entram no desenho consumido por `run_matrix.csv`.
+Esse parâmetro controla a curadoria dos speakers selecionados para o manifesto. O desenho consumido por `run_matrix.csv` agora vem diretamente de `speaker_selection.csv`, não de um contador no YAML.
 
 Registre o inventário hierárquico dos dados:
 
@@ -268,11 +268,11 @@ Impacto esperado:
 - muda o conjunto de speakers elegíveis no manifesto
 - não altera, por si só, quantos `speaker_XX` entram na `run_matrix`
 
-Para alterar o desenho consumido no treino e na inferência, edite o YAML:
+Para alterar o desenho consumido no treino e na inferência:
 
-- `data.speaker_target_count`
-- `conditions[].speaker_subset_count`
-- `conditions[].prompt_subset_count`
+- ajuste `speaker_selection.csv` na etapa de curadoria
+- use `conditions[].speaker_subset_count` se quiser cortar um subconjunto dos speakers já selecionados
+- use `conditions[].prompt_subset_count` se quiser reduzir prompts por condição
 
 ### Treino LoRA
 

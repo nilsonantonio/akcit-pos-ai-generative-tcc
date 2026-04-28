@@ -11,6 +11,7 @@ import pandas as pd
 from tcc_audio.cli_defaults import (
     DEFAULT_RUN_MATRIX_PATH,
     load_cli_config,
+    resolve_data_path,
     resolve_deliverable_path,
 )
 from tcc_audio.io import ensure_parent_dir, read_csv, read_yaml
@@ -36,6 +37,30 @@ def _iter_lora_conditions(config: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return output
 
 
+def _load_selected_speakers(config: Mapping[str, Any]) -> list[str]:
+    data_config = config.get("data", {})
+    if not isinstance(data_config, Mapping) or not str(data_config.get("speaker_selection_path", "")).strip():
+        raise ValueError("Config must define data.speaker_selection_path")
+    speaker_selection_path = resolve_data_path(config, "speaker_selection_path", "")
+    if not speaker_selection_path.exists():
+        raise ValueError(f"Speaker selection file not found: {speaker_selection_path}")
+
+    speaker_selection = read_csv(speaker_selection_path)
+    if "speaker_id" not in speaker_selection.columns:
+        raise ValueError("speaker_selection.csv must contain speaker_id")
+
+    speakers = (
+        speaker_selection["speaker_id"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    speakers = [speaker_id for speaker_id in speakers.tolist() if speaker_id]
+    if not speakers:
+        raise ValueError(f"No speaker_id rows found in speaker selection file: {speaker_selection_path}")
+    return speakers
+
+
 def generate_run_matrix(config_path: str | Path, out_path: str | Path | None = None) -> pd.DataFrame:
     config = read_yaml(config_path)
     data_config = config.get("data", {})
@@ -45,8 +70,8 @@ def generate_run_matrix(config_path: str | Path, out_path: str | Path | None = N
         raise ValueError("Config must define data.prompts_path")
 
     prompts = read_csv(prompts_path)
-    speaker_count = int(data_config.get("speaker_target_count", 4))
-    speakers = [f"speaker_{index:02d}" for index in range(1, speaker_count + 1)]
+    speakers = _load_selected_speakers(config)
+    speaker_count = len(speakers)
 
     rows: list[dict[str, object]] = []
     for condition in conditions:
@@ -54,6 +79,12 @@ def generate_run_matrix(config_path: str | Path, out_path: str | Path | None = N
         normalization_modes = condition.get("normalization_modes", ["normalized"])
         speaker_subset_count = condition.get("speaker_subset_count", speaker_count)
         prompt_subset_count = condition.get("prompt_subset_count")
+
+        if int(speaker_subset_count) > speaker_count:
+            raise ValueError(
+                f"Condition `{condition_id}` requests speaker_subset_count={speaker_subset_count}, "
+                f"but only {speaker_count} speakers are available in speaker_selection.csv"
+            )
 
         selected_speakers = speakers[: int(speaker_subset_count)]
         selected_prompts = prompts.copy()
@@ -84,11 +115,6 @@ def generate_run_matrix(config_path: str | Path, out_path: str | Path | None = N
                             "category": prompt["category"],
                             "text_variant": text_variant,
                             "target_text": target_text,
-                            "minutes_per_speaker": condition.get(
-                                "minutes_per_speaker", data_config.get("minutes_per_speaker", "")
-                            ),
-                            "reference_clip_min_s": data_config.get("reference_clip_len_s", {}).get("min", ""),
-                            "reference_clip_max_s": data_config.get("reference_clip_len_s", {}).get("max", ""),
                             "sample_rate": data_config.get("sample_rate", ""),
                             "compute_target": config.get("project", {}).get("compute_target", ""),
                             "seed": config.get("project", {}).get("seed", ""),
