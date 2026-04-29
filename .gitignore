@@ -6,6 +6,7 @@ __pycache__/
 venv/
 .env
 NISQA/
+configs/speecht5_minimal.yaml
 
 artifacts/
 report_assets/
