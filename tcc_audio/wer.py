@@ -10,7 +10,7 @@ from pathlib import Path
 import pandas as pd
 
 from tcc_audio.cli_defaults import DEFAULT_SAMPLES_PATH, load_cli_config, resolve_samples_path
-from tcc_audio.runtime import load_samples, refresh_sample_status, save_samples
+from tcc_audio.runtime import audio_exists_mask, load_samples, refresh_sample_status, save_samples_atomic
 
 
 def normalize_for_wer(text: str) -> list[str]:
@@ -49,7 +49,12 @@ def compute_wer_from_asr(
     if asr_column not in samples.columns:
         raise ValueError(f"samples.csv must contain {asr_column}")
 
+    audio_exists = audio_exists_mask(samples)
+
     def score(row: pd.Series) -> object:
+        row_audio_exists = bool(audio_exists.loc[row.name])
+        if not row_audio_exists or str(row["failure_reason"]).strip():
+            return row.get("wer", "")
         if str(row[asr_column]).strip() == "":
             return row.get("wer", "")
         return word_error_rate(row["target_text"], row[asr_column])
@@ -57,7 +62,7 @@ def compute_wer_from_asr(
     samples["wer"] = samples.apply(score, axis=1)
     samples = refresh_sample_status(samples)
     if out_path:
-        save_samples(samples, out_path)
+        save_samples_atomic(samples, out_path)
     return samples
 
 

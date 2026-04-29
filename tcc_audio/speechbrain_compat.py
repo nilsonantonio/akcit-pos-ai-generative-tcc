@@ -6,6 +6,8 @@ from pathlib import Path
 
 import numpy as np
 
+from tcc_audio.device import resolve_speechbrain_run_opts as _resolve_speechbrain_run_opts
+
 
 def load_encoder_classifier():
     try:
@@ -18,11 +20,7 @@ def load_encoder_classifier():
 
 
 def resolve_speechbrain_run_opts() -> dict[str, str]:
-    try:
-        import torch
-    except ImportError:
-        return {"device": "cpu"}
-    return {"device": "cuda:0" if torch.cuda.is_available() else "cpu"}
+    return _resolve_speechbrain_run_opts()
 
 
 def encode_audio_path(classifier, audio_path: str | Path) -> np.ndarray:

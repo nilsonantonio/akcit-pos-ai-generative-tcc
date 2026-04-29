@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import platform
-import tempfile
 from copy import deepcopy
 from pathlib import Path
 
@@ -16,38 +14,25 @@ from tcc_audio.config import (
     resolve_asr_model,
     resolve_asr_task,
 )
-from tcc_audio.io import ensure_parent_dir
-from tcc_audio.runtime import load_samples, now_utc_iso, refresh_sample_status
+from tcc_audio.device import resolve_device_type, resolve_transformers_pipeline_device
+from tcc_audio.runtime import load_samples, refresh_sample_status, save_samples_atomic
 
 
 def _load_asr_pipeline():
     try:
-        import torch
         from transformers import pipeline
     except ImportError as exc:
         raise SystemExit("Transformers and torch are required for Whisper batch transcription.") from exc
-
-    if torch.cuda.is_available():
-        device = 0
-    elif platform.system() == "Darwin" and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = -1
-
-    return pipeline, device
+    return pipeline, resolve_transformers_pipeline_device()
 
 
 def _describe_device(device: object) -> str:
-    if isinstance(device, int):
-        return "CUDA" if device >= 0 else "CPU"
-    device_type = getattr(device, "type", str(device)).lower()
-    if device_type.startswith("cuda"):
+    device_type = resolve_device_type()
+    if device_type == "cuda":
         return "CUDA"
-    if device_type.startswith("mps"):
+    if device_type == "mps":
         return "MPS"
-    if device_type.startswith("cpu"):
-        return "CPU"
-    return device_type.upper()
+    return "CPU"
 
 
 def _build_generation_config(transcriber, task: str, language: str):
@@ -63,29 +48,6 @@ def _build_generation_config(transcriber, task: str, language: str):
     if begin_suppress_tokens is not None:
         generation_config.begin_suppress_tokens = list(begin_suppress_tokens)
     return generation_config
-
-
-def _save_samples_atomic(samples, path: str | Path) -> None:
-    destination = Path(path)
-    ensure_parent_dir(destination)
-
-    tmp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            newline="",
-            dir=destination.parent,
-            prefix=f".{destination.stem}_",
-            suffix=destination.suffix,
-            delete=False,
-        ) as handle:
-            samples.to_csv(handle, index=False)
-            tmp_path = Path(handle.name)
-        tmp_path.replace(destination)
-    finally:
-        if tmp_path is not None and tmp_path.exists():
-            tmp_path.unlink()
 
 
 def run_whisper_batch(
@@ -120,7 +82,7 @@ def run_whisper_batch(
 
     if pending_total == 0:
         samples = refresh_sample_status(samples)
-        _save_samples_atomic(samples, out_path)
+        save_samples_atomic(samples, out_path)
         print("No pending ASR rows.")
         return
 
@@ -152,7 +114,7 @@ def run_whisper_batch(
                 failed += 1
 
         samples = refresh_sample_status(samples)
-        _save_samples_atomic(samples, out_path)
+        save_samples_atomic(samples, out_path)
 
         remaining = pending_total - current
         print(

@@ -1,4 +1,4 @@
-"""Create the evaluation samples ledger from the run matrix."""
+"""Create and materialize the evaluation samples ledger."""
 
 from __future__ import annotations
 
@@ -19,8 +19,13 @@ from tcc_audio.cli_defaults import (
     resolve_deliverable_path,
 )
 from tcc_audio.io import ensure_parent_dir, read_csv
-from tcc_audio.runtime import load_samples, load_speaker_reference_map, save_samples, stringify_csv_value
+from tcc_audio.runtime import load_samples, load_speaker_reference_map, save_samples_atomic, stringify_csv_value
 from tcc_audio.schema import EVAL_SAMPLES_REQUIRED_COLUMNS, SAMPLES_OPTIONAL_COLUMNS
+
+
+def empty_samples_frame() -> pd.DataFrame:
+    rows = [{column: "" for column in EVAL_SAMPLES_REQUIRED_COLUMNS + SAMPLES_OPTIONAL_COLUMNS}]
+    return pd.DataFrame(rows).iloc[0:0].copy()
 
 
 def initialize_samples(
@@ -30,59 +35,8 @@ def initialize_samples(
     speaker_selection_path: str | Path | None = None,
     speaker_embeddings_path: str | Path | None = None,
 ) -> pd.DataFrame:
-    del audio_base_dir
-    run_matrix = read_csv(run_matrix_path)
-    required = ["run_id", "condition", "speaker_id", "prompt_id", "text_variant", "target_text"]
-    missing = [column for column in required if column not in run_matrix.columns]
-    if missing:
-        raise ValueError(f"Missing run matrix columns: {', '.join(missing)}")
-
-    speaker_reference_map = {}
-    if speaker_selection_path:
-        speaker_reference_map = load_speaker_reference_map(speaker_selection_path)
-
-    speaker_embeddings: dict[str, dict[str, str]] = {}
-    if speaker_embeddings_path:
-        embeddings_frame = read_csv(speaker_embeddings_path)
-        if "speaker_id" not in embeddings_frame.columns:
-            raise ValueError("speaker_embeddings CSV must contain speaker_id")
-        speaker_embeddings = {row["speaker_id"]: row.to_dict() for _, row in embeddings_frame.iterrows()}
-
-    rows: list[dict[str, object]] = []
-    for _, run in run_matrix.iterrows():
-        row = {column: "" for column in EVAL_SAMPLES_REQUIRED_COLUMNS}
-        for column in SAMPLES_OPTIONAL_COLUMNS:
-            row[column] = ""
-        speaker_meta = speaker_reference_map.get(run["speaker_id"], {})
-        embedding_meta = speaker_embeddings.get(run["speaker_id"], {})
-        row.update(
-            {
-                "sample_id": run["run_id"],
-                "run_id": run["run_id"],
-                "condition": run["condition"],
-                "speaker_id": run["speaker_id"],
-                "prompt_id": run["prompt_id"],
-                "text_variant": run["text_variant"],
-                "target_text": run["target_text"],
-                "audio_path": "",
-                "reference_audio_path": speaker_meta.get("reference_audio", ""),
-                # This field stores the embedding consumed by the TTS synthesis step.
-                "speaker_embedding_path": embedding_meta.get("speaker_embedding_path", ""),
-                "model_name": run.get("model_name", ""),
-                "status": "pending",
-                "failure_reason": "",
-                "checkpoint_label": "",
-                "checkpoint_step": "",
-                "checkpoint_path": "",
-                "checkpoint_run_ts": "",
-                "training_scope": run.get("training_scope", "per_speaker"),
-                "training_unit": "",
-                "lora_gate_status": "",
-            }
-        )
-        rows.append(row)
-
-    samples = pd.DataFrame(rows)
+    del run_matrix_path, audio_base_dir, speaker_selection_path, speaker_embeddings_path
+    samples = empty_samples_frame()
     ensure_parent_dir(out_path)
     samples.to_csv(out_path, index=False)
     return samples
@@ -116,6 +70,7 @@ def _build_checkpoint_audio_path(
 
 def materialize_checkpoint_samples(
     samples_path: str | Path,
+    run_matrix_path: str | Path,
     condition_id: str,
     checkpoint_step: int,
     checkpoint_path: str | Path,
@@ -125,27 +80,64 @@ def materialize_checkpoint_samples(
     audio_base_dir: str | Path,
     total_train_gpu_hours: float,
     gpu_hourly_rate: float,
+    speaker_selection_path: str | Path | None = None,
+    speaker_embeddings_path: str | Path | None = None,
+    speaker_ids: Iterable[str] | None = None,
+    prompt_ids: Iterable[str] | None = None,
 ) -> list[str]:
     samples = load_samples(samples_path)
-    base_mask = samples["condition"].eq(condition_id) & ~_is_materialized_row(samples)
+    run_matrix = read_csv(run_matrix_path)
+    required = ["run_id", "condition", "speaker_id", "prompt_id", "text_variant", "target_text"]
+    missing = [column for column in required if column not in run_matrix.columns]
+    if missing:
+        raise ValueError(f"Missing run matrix columns: {', '.join(missing)}")
+
+    selected_speakers = {str(value).strip() for value in (speaker_ids or []) if str(value).strip()}
+    selected_prompts = {str(value).strip() for value in (prompt_ids or []) if str(value).strip()}
+
+    base_rows = run_matrix[run_matrix["condition"].eq(condition_id)].copy()
     if training_scope == "per_speaker":
-        base_mask &= samples["speaker_id"].eq(training_unit)
-    base_rows = samples[base_mask].copy()
+        base_rows = base_rows[base_rows["speaker_id"].eq(training_unit)].copy()
+    if selected_speakers:
+        base_rows = base_rows[base_rows["speaker_id"].isin(selected_speakers)].copy()
+    if selected_prompts:
+        base_rows = base_rows[base_rows["prompt_id"].isin(selected_prompts)].copy()
     if base_rows.empty:
         return []
+
+    speaker_reference_map = load_speaker_reference_map(speaker_selection_path) if speaker_selection_path else {}
+    speaker_embeddings: dict[str, dict[str, str]] = {}
+    if speaker_embeddings_path:
+        embeddings_frame = read_csv(speaker_embeddings_path)
+        if "speaker_id" not in embeddings_frame.columns:
+            raise ValueError("speaker_embeddings CSV must contain speaker_id")
+        speaker_embeddings = {row["speaker_id"]: row.to_dict() for _, row in embeddings_frame.iterrows()}
 
     train_gpu_hours_per_sample = total_train_gpu_hours / max(len(base_rows), 1)
     cost_usd_per_sample = train_gpu_hours_per_sample * gpu_hourly_rate
     checkpoint_label = f"{condition_id}@step{checkpoint_step}"
+    existing_sample_ids = set(samples["sample_id"].astype(str).tolist())
 
     rows: list[dict[str, object]] = []
     sample_ids: list[str] = []
     for _, row in base_rows.iterrows():
-        materialized = row.to_dict()
         sample_id = f"{row['run_id']}__{checkpoint_run_ts}__step{checkpoint_step}"
+        if sample_id in existing_sample_ids:
+            sample_ids.append(sample_id)
+            continue
+        speaker_id = str(row["speaker_id"])
+        speaker_meta = speaker_reference_map.get(speaker_id, {})
+        embedding_meta = speaker_embeddings.get(speaker_id, {})
+        materialized = {column: "" for column in EVAL_SAMPLES_REQUIRED_COLUMNS + SAMPLES_OPTIONAL_COLUMNS}
         materialized.update(
             {
                 "sample_id": sample_id,
+                "run_id": row["run_id"],
+                "condition": row["condition"],
+                "speaker_id": speaker_id,
+                "prompt_id": row["prompt_id"],
+                "text_variant": row["text_variant"],
+                "target_text": row["target_text"],
                 "audio_path": str(
                     _build_checkpoint_audio_path(
                         audio_base_dir=audio_base_dir,
@@ -159,6 +151,9 @@ def materialize_checkpoint_samples(
                         text_variant=row["text_variant"],
                     )
                 ),
+                "reference_audio_path": speaker_meta.get("reference_audio", ""),
+                "speaker_embedding_path": embedding_meta.get("speaker_embedding_path", ""),
+                "model_name": row.get("model_name", checkpoint_label),
                 "checkpoint_label": checkpoint_label,
                 "checkpoint_step": stringify_csv_value(checkpoint_step),
                 "checkpoint_path": str(checkpoint_path),
@@ -185,8 +180,10 @@ def materialize_checkpoint_samples(
         rows.append(materialized)
         sample_ids.append(sample_id)
 
+    if not rows:
+        return sample_ids
     combined = pd.concat([samples, pd.DataFrame(rows)], ignore_index=True)
-    save_samples(combined, samples_path)
+    save_samples_atomic(combined, samples_path)
     return sample_ids
 
 

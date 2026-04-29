@@ -77,6 +77,7 @@ from tcc_audio.dataset_slice_analysis import (
     main as dataset_slice_analysis_main,
     render_dataset_slice_analysis,
 )
+from tcc_audio.device import resolve_device_type, resolve_speechbrain_run_opts
 from tcc_audio.experiments import build_arg_parser as build_run_matrix_arg_parser, generate_run_matrix
 from tcc_audio.evaluation import aggregate_metrics
 from tcc_audio.manifest import build_arg_parser as build_manifest_arg_parser, validate_data_manifest, validate_prompts
@@ -99,6 +100,7 @@ from tcc_audio.speecht5_runner import (
     _build_training_args,
     _build_trainer,
     _build_condition_run_root,
+    _iter_training_units,
     _apply_lora_adapter,
     _log_training_dataset_summary,
     _resolve_gpu_hourly_rate,
@@ -106,8 +108,10 @@ from tcc_audio.speecht5_runner import (
     _load_torch_stack,
     _load_training_stack,
     _tee_console_output,
+    _train_condition,
     _training_log_path,
     _training_metadata_path,
+    materialize_condition_samples,
     _write_training_metadata,
     build_lora_arg_parser,
 )
@@ -817,12 +821,12 @@ def test_run_matrix_generation() -> None:
             speaker_selection_path=speaker_selection,
             speaker_embeddings_path=embeddings,
         )
-        assert len(samples) == len(matrix)
+        assert len(samples) == 0
         assert "asr_text" in samples.columns
         assert "reference_audio_path" in samples.columns
         assert "speaker_embedding_path" in samples.columns
         assert "checkpoint_step" in samples.columns
-        assert samples["audio_path"].astype(str).str.strip().eq("").all()
+        assert samples.empty
 
 
 def test_lora_run_matrix_supports_raw_and_normalized_modes() -> None:
@@ -1092,6 +1096,7 @@ def test_materialize_checkpoint_samples_expands_rows_per_checkpoint() -> None:
         )
         sample_ids = materialize_checkpoint_samples(
             samples_path=samples_path,
+            run_matrix_path=run_matrix_path,
             condition_id="lora_cond",
             checkpoint_step=500,
             checkpoint_path=tmp / "checkpoints/lora_cond/20260426T010203Z/speaker_01/checkpoint-500",
@@ -1101,11 +1106,13 @@ def test_materialize_checkpoint_samples_expands_rows_per_checkpoint() -> None:
             audio_base_dir=tmp / "audio",
             total_train_gpu_hours=1.5,
             gpu_hourly_rate=2.0,
+            speaker_selection_path=speaker_selection,
+            speaker_embeddings_path=embeddings,
         )
         materialized = load_samples(samples_path)
 
     assert sample_ids == ["lora_cond__speaker_01__P001__normalized__20260426T010203Z__step500"]
-    assert len(materialized) == 2
+    assert len(materialized) == 1
     checkpoint_rows = materialized[materialized["checkpoint_step"].astype(str).str.strip().ne("")]
     assert len(checkpoint_rows) == 1
     row = checkpoint_rows.iloc[0]
@@ -1131,14 +1138,212 @@ def test_reset_condition_checkpoint_rows_keeps_base_rows_only() -> None:
     assert cleaned["sample_id"].tolist() == ["base", "other"]
 
 
+def test_materialize_condition_samples_defaults_to_best_checkpoint_per_speaker() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        config_path = tmp / "config.yaml"
+        run_matrix_path = tmp / "run_matrix.csv"
+        samples_path = tmp / "samples.csv"
+        selection_path = tmp / "speaker_selection.csv"
+        embeddings_path = tmp / "speaker_embeddings.csv"
+        checkpoint_dir = tmp / "artifacts/checkpoints/lora"
+        condition_id = "cond_a"
+        run_ts = "20260429T010203Z"
+        config_path.write_text(
+            "project:\n"
+            "  primary_model: microsoft/speecht5_tts\n"
+            "data:\n"
+            f"  speaker_selection_path: {selection_path}\n"
+            f"  speaker_embeddings_index: {embeddings_path}\n"
+            "conditions:\n"
+            "  - id: cond_a\n"
+            "    train_strategy: lora\n"
+            "    training:\n"
+            "      scope: per_speaker\n",
+            encoding="utf-8",
+        )
+        pd.DataFrame(
+            [
+                {
+                    "run_id": "cond_a__speaker_01__P001__normalized",
+                    "condition": "cond_a",
+                    "speaker_id": "speaker_01",
+                    "prompt_id": "P001",
+                    "text_variant": "normalized",
+                    "target_text": "Texto normalizado.",
+                    "model_name": "microsoft/speecht5_tts",
+                    "training_scope": "per_speaker",
+                },
+                {
+                    "run_id": "cond_a__speaker_02__P001__normalized",
+                    "condition": "cond_a",
+                    "speaker_id": "speaker_02",
+                    "prompt_id": "P001",
+                    "text_variant": "normalized",
+                    "target_text": "Texto normalizado.",
+                    "model_name": "microsoft/speecht5_tts",
+                    "training_scope": "per_speaker",
+                },
+            ]
+        ).to_csv(run_matrix_path, index=False)
+        pd.DataFrame(
+            [
+                {"speaker_id": "speaker_01", "reference_audio": "ref_01.wav"},
+                {"speaker_id": "speaker_02", "reference_audio": "ref_02.wav"},
+            ]
+        ).to_csv(selection_path, index=False)
+        pd.DataFrame(
+            [
+                {"speaker_id": "speaker_01", "speaker_embedding_path": "emb_01.npy"},
+                {"speaker_id": "speaker_02", "speaker_embedding_path": "emb_02.npy"},
+            ]
+        ).to_csv(embeddings_path, index=False)
+        initialize_samples(run_matrix_path, samples_path)
+        metadata_path = checkpoint_dir / condition_id / run_ts / "metadata.json"
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "training_units": [
+                        {"training_unit": "speaker_01", "train_gpu_hours": 1.0},
+                        {"training_unit": "speaker_02", "train_gpu_hours": 2.0},
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        for speaker_id, best_step in [("speaker_01", 1000), ("speaker_02", 1500)]:
+            unit_dir = checkpoint_dir / condition_id / run_ts / speaker_id
+            best_dir = unit_dir / f"checkpoint-{best_step}"
+            other_dir = unit_dir / "checkpoint-500"
+            best_dir.mkdir(parents=True, exist_ok=True)
+            other_dir.mkdir(parents=True, exist_ok=True)
+            (best_dir / "trainer_state.json").write_text(
+                json.dumps({"best_model_checkpoint": str(best_dir)}),
+                encoding="utf-8",
+            )
+            (other_dir / "trainer_state.json").write_text(
+                json.dumps({"best_model_checkpoint": str(best_dir)}),
+                encoding="utf-8",
+            )
+
+        condition = {"id": condition_id, "train_strategy": "lora", "training": {"scope": "per_speaker", "gpu_hourly_rate": 1.5}}
+        sample_ids = materialize_condition_samples(
+            config_path=config_path,
+            samples_path=samples_path,
+            run_matrix_path=run_matrix_path,
+            checkpoint_dir=checkpoint_dir,
+            condition=condition,
+            checkpoint_run_ts=run_ts,
+        )
+        materialized = load_samples(samples_path)
+
+    assert len(sample_ids) == 2
+    assert sorted(materialized["checkpoint_step"].astype(str).tolist()) == ["1000", "1500"]
+
+
+def test_materialize_condition_samples_defaults_to_best_checkpoint_for_unique_scope() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        config_path = tmp / "config.yaml"
+        run_matrix_path = tmp / "run_matrix.csv"
+        samples_path = tmp / "samples.csv"
+        selection_path = tmp / "speaker_selection.csv"
+        embeddings_path = tmp / "speaker_embeddings.csv"
+        checkpoint_dir = tmp / "artifacts/checkpoints/lora"
+        condition_id = "cond_unique"
+        run_ts = "20260429T010203Z"
+        config_path.write_text(
+            "project:\n"
+            "  primary_model: microsoft/speecht5_tts\n"
+            "data:\n"
+            f"  speaker_selection_path: {selection_path}\n"
+            f"  speaker_embeddings_index: {embeddings_path}\n"
+            "conditions:\n"
+            "  - id: cond_unique\n"
+            "    train_strategy: lora\n"
+            "    training:\n"
+            "      scope: unique\n",
+            encoding="utf-8",
+        )
+        pd.DataFrame(
+            [
+                {
+                    "run_id": "cond_unique__speaker_01__P001__normalized",
+                    "condition": "cond_unique",
+                    "speaker_id": "speaker_01",
+                    "prompt_id": "P001",
+                    "text_variant": "normalized",
+                    "target_text": "Texto normalizado.",
+                    "model_name": "microsoft/speecht5_tts",
+                    "training_scope": "unique",
+                },
+                {
+                    "run_id": "cond_unique__speaker_02__P001__normalized",
+                    "condition": "cond_unique",
+                    "speaker_id": "speaker_02",
+                    "prompt_id": "P001",
+                    "text_variant": "normalized",
+                    "target_text": "Texto normalizado.",
+                    "model_name": "microsoft/speecht5_tts",
+                    "training_scope": "unique",
+                },
+            ]
+        ).to_csv(run_matrix_path, index=False)
+        pd.DataFrame(
+            [
+                {"speaker_id": "speaker_01", "reference_audio": "ref_01.wav"},
+                {"speaker_id": "speaker_02", "reference_audio": "ref_02.wav"},
+            ]
+        ).to_csv(selection_path, index=False)
+        pd.DataFrame(
+            [
+                {"speaker_id": "speaker_01", "speaker_embedding_path": "emb_01.npy"},
+                {"speaker_id": "speaker_02", "speaker_embedding_path": "emb_02.npy"},
+            ]
+        ).to_csv(embeddings_path, index=False)
+        initialize_samples(run_matrix_path, samples_path)
+        metadata_path = checkpoint_dir / condition_id / run_ts / "metadata.json"
+        metadata_path.parent.mkdir(parents=True, exist_ok=True)
+        metadata_path.write_text(
+            json.dumps({"training_units": [{"training_unit": "unique", "train_gpu_hours": 3.0}]}),
+            encoding="utf-8",
+        )
+        unit_dir = checkpoint_dir / condition_id / run_ts / "unique"
+        best_dir = unit_dir / "checkpoint-1500"
+        other_dir = unit_dir / "checkpoint-500"
+        best_dir.mkdir(parents=True, exist_ok=True)
+        other_dir.mkdir(parents=True, exist_ok=True)
+        (best_dir / "trainer_state.json").write_text(
+            json.dumps({"best_model_checkpoint": str(best_dir)}),
+            encoding="utf-8",
+        )
+        (other_dir / "trainer_state.json").write_text(
+            json.dumps({"best_model_checkpoint": str(best_dir)}),
+            encoding="utf-8",
+        )
+
+        condition = {"id": condition_id, "train_strategy": "lora", "training": {"scope": "unique"}}
+        sample_ids = materialize_condition_samples(
+            config_path=config_path,
+            samples_path=samples_path,
+            run_matrix_path=run_matrix_path,
+            checkpoint_dir=checkpoint_dir,
+            condition=condition,
+            checkpoint_run_ts=run_ts,
+        )
+        materialized = load_samples(samples_path)
+
+    assert len(sample_ids) == 2
+    assert set(materialized["checkpoint_step"].astype(str)) == {"1500"}
+
+
 def test_build_lora_arg_parser_accepts_repeated_condition_flags() -> None:
     parser = build_lora_arg_parser()
     args = parser.parse_args(
         [
             "--config",
             "config.yaml",
-            "--samples",
-            "samples.csv",
             "--manifest",
             "manifest.csv",
             "--checkpoint-dir",
@@ -1147,11 +1352,19 @@ def test_build_lora_arg_parser_accepts_repeated_condition_flags() -> None:
             "cond_a",
             "--condition",
             "cond_b",
+            "--resume-train",
+            "--checkpoint-run-ts",
+            "20260429T010203Z",
+            "--speaker-id",
+            "speaker_01",
         ]
     )
 
     assert args.condition == ["cond_a", "cond_b"]
     assert args.gpu_hourly_rate is None
+    assert args.resume_train is True
+    assert args.checkpoint_run_ts == "20260429T010203Z"
+    assert args.speaker_id == ["speaker_01"]
 
 
 def test_build_lora_arg_parser_accepts_gpu_hourly_rate_override() -> None:
@@ -1160,8 +1373,6 @@ def test_build_lora_arg_parser_accepts_gpu_hourly_rate_override() -> None:
         [
             "--config",
             "config.yaml",
-            "--samples",
-            "samples.csv",
             "--manifest",
             "manifest.csv",
             "--checkpoint-dir",
@@ -1176,13 +1387,222 @@ def test_build_lora_arg_parser_accepts_gpu_hourly_rate_override() -> None:
 
 def test_build_lora_arg_parser_accepts_short_aliases() -> None:
     parser = build_lora_arg_parser()
-    args = parser.parse_args(["-c", "config.yaml", "-s", "samples.csv", "-m", "manifest.csv", "-k", "ckpts", "-C", "cond_a"])
+    args = parser.parse_args(["-c", "config.yaml", "-m", "manifest.csv", "-k", "ckpts", "-C", "cond_a"])
 
     assert args.config == "config.yaml"
-    assert args.samples == "samples.csv"
     assert args.manifest == "manifest.csv"
     assert args.checkpoint_dir == "ckpts"
     assert args.condition == ["cond_a"]
+
+
+def test_iter_training_units_rejects_speaker_filter_for_unique_scope() -> None:
+    train_rows = pd.DataFrame([{"speaker_id": "speaker_01"}])
+    val_rows = pd.DataFrame([{"speaker_id": "speaker_01"}])
+    try:
+        _iter_training_units(train_rows, val_rows, "unique", selected_speaker_ids=["speaker_01"])
+    except ValueError as exc:
+        assert "unique" in str(exc)
+        assert "Speaker filters" in str(exc)
+    else:
+        raise AssertionError("expected unique scope to reject speaker filters")
+
+
+def test_train_condition_resumes_from_latest_checkpoint_per_speaker() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        config_path = tmp / "config.yaml"
+        manifest_path = tmp / "manifest.csv"
+        checkpoint_dir = tmp / "artifacts/checkpoints/lora"
+        run_ts = "20260429T010203Z"
+        output_dir = checkpoint_dir / "cond_a" / run_ts / "speaker_01"
+        checkpoint = output_dir / "checkpoint-500"
+        checkpoint.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            "project:\n"
+            "  primary_model: microsoft/speecht5_tts\n"
+            "data:\n"
+            f"  speaker_embeddings_index: {tmp / 'embeddings.csv'}\n"
+            "conditions:\n"
+            "  - id: cond_a\n"
+            "    train_strategy: lora\n"
+            "    training:\n"
+            "      scope: per_speaker\n",
+            encoding="utf-8",
+        )
+        pd.DataFrame([{"speaker_id": "speaker_01", "speaker_embedding_path": str(tmp / "speaker_01.npy")}]).to_csv(
+            tmp / "embeddings.csv",
+            index=False,
+        )
+        np.save(tmp / "speaker_01.npy", np.ones(512, dtype=np.float32))
+        pd.DataFrame(
+            [
+                {
+                    "speaker_id": "speaker_01",
+                    "split": "train",
+                    "duration_s": "1.0",
+                    "audio_path": str(tmp / "train.wav"),
+                    "target_text": "texto",
+                    "target_text_speecht5": "texto",
+                },
+                {
+                    "speaker_id": "speaker_01",
+                    "split": "val",
+                    "duration_s": "1.0",
+                    "audio_path": str(tmp / "val.wav"),
+                    "target_text": "texto",
+                    "target_text_speecht5": "texto",
+                },
+            ]
+        ).to_csv(manifest_path, index=False)
+        _write_wav(tmp / "train.wav")
+        _write_wav(tmp / "val.wav")
+
+        resume_calls: list[str | None] = []
+
+        class FakeProcessor:
+            @classmethod
+            def from_pretrained(cls, *_args, **_kwargs):
+                return cls()
+
+        class FakeModel:
+            @classmethod
+            def from_pretrained(cls, *_args, **_kwargs):
+                return cls()
+
+        class FakeTrainer:
+            def train(self, resume_from_checkpoint=None):
+                resume_calls.append(resume_from_checkpoint)
+
+            def save_model(self):
+                output_dir.mkdir(parents=True, exist_ok=True)
+                (output_dir / "adapter_model.safetensors").write_text("x", encoding="utf-8")
+
+        class FakeArgs:
+            pass
+
+        fake_stack = {
+            "SpeechT5Processor": FakeProcessor,
+            "SpeechT5ForTextToSpeech": FakeModel,
+        }
+
+        with (
+            patch("tcc_audio.speecht5_runner._load_training_stack", return_value=fake_stack),
+            patch("tcc_audio.speecht5_runner._prepare_speaker_embedding_map", return_value={"speaker_01": str(tmp / "speaker_01.npy")}),
+            patch("tcc_audio.speecht5_runner._build_dataset", return_value=lambda frame, processor: frame),
+            patch("tcc_audio.speecht5_runner._build_training_args", return_value=FakeArgs()),
+            patch("tcc_audio.speecht5_runner._build_trainer", return_value=FakeTrainer()),
+            patch("tcc_audio.speecht5_runner._apply_lora_adapter", side_effect=lambda model, cfg: model),
+        ):
+            _train_condition(
+                config_path=config_path,
+                manifest_path=manifest_path,
+                checkpoint_dir=checkpoint_dir,
+                condition={"id": "cond_a", "train_strategy": "lora", "training": {"scope": "per_speaker"}},
+                gpu_hourly_rate_override=None,
+                checkpoint_run_ts=run_ts,
+                resume_train=True,
+            )
+
+    assert resume_calls == [str(checkpoint)]
+
+
+def test_train_condition_resumes_from_latest_checkpoint_for_unique_scope() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        config_path = tmp / "config.yaml"
+        manifest_path = tmp / "manifest.csv"
+        checkpoint_dir = tmp / "artifacts/checkpoints/lora"
+        run_ts = "20260429T010203Z"
+        output_dir = checkpoint_dir / "cond_unique" / run_ts / "unique"
+        checkpoint = output_dir / "checkpoint-500"
+        checkpoint.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            "project:\n"
+            "  primary_model: microsoft/speecht5_tts\n"
+            "data:\n"
+            f"  speaker_embeddings_index: {tmp / 'embeddings.csv'}\n"
+            "conditions:\n"
+            "  - id: cond_unique\n"
+            "    train_strategy: lora\n"
+            "    training:\n"
+            "      scope: unique\n",
+            encoding="utf-8",
+        )
+        pd.DataFrame([{"speaker_id": "speaker_01", "speaker_embedding_path": str(tmp / "speaker_01.npy")}]).to_csv(
+            tmp / "embeddings.csv",
+            index=False,
+        )
+        np.save(tmp / "speaker_01.npy", np.ones(512, dtype=np.float32))
+        pd.DataFrame(
+            [
+                {
+                    "speaker_id": "speaker_01",
+                    "split": "train",
+                    "duration_s": "1.0",
+                    "audio_path": str(tmp / "train.wav"),
+                    "target_text": "texto",
+                    "target_text_speecht5": "texto",
+                },
+                {
+                    "speaker_id": "speaker_01",
+                    "split": "val",
+                    "duration_s": "1.0",
+                    "audio_path": str(tmp / "val.wav"),
+                    "target_text": "texto",
+                    "target_text_speecht5": "texto",
+                },
+            ]
+        ).to_csv(manifest_path, index=False)
+        _write_wav(tmp / "train.wav")
+        _write_wav(tmp / "val.wav")
+
+        resume_calls: list[str | None] = []
+
+        class FakeProcessor:
+            @classmethod
+            def from_pretrained(cls, *_args, **_kwargs):
+                return cls()
+
+        class FakeModel:
+            @classmethod
+            def from_pretrained(cls, *_args, **_kwargs):
+                return cls()
+
+        class FakeTrainer:
+            def train(self, resume_from_checkpoint=None):
+                resume_calls.append(resume_from_checkpoint)
+
+            def save_model(self):
+                output_dir.mkdir(parents=True, exist_ok=True)
+                (output_dir / "adapter_model.safetensors").write_text("x", encoding="utf-8")
+
+        class FakeArgs:
+            pass
+
+        fake_stack = {
+            "SpeechT5Processor": FakeProcessor,
+            "SpeechT5ForTextToSpeech": FakeModel,
+        }
+
+        with (
+            patch("tcc_audio.speecht5_runner._load_training_stack", return_value=fake_stack),
+            patch("tcc_audio.speecht5_runner._prepare_speaker_embedding_map", return_value={"speaker_01": str(tmp / "speaker_01.npy")}),
+            patch("tcc_audio.speecht5_runner._build_dataset", return_value=lambda frame, processor: frame),
+            patch("tcc_audio.speecht5_runner._build_training_args", return_value=FakeArgs()),
+            patch("tcc_audio.speecht5_runner._build_trainer", return_value=FakeTrainer()),
+            patch("tcc_audio.speecht5_runner._apply_lora_adapter", side_effect=lambda model, cfg: model),
+        ):
+            _train_condition(
+                config_path=config_path,
+                manifest_path=manifest_path,
+                checkpoint_dir=checkpoint_dir,
+                condition={"id": "cond_unique", "train_strategy": "lora", "training": {"scope": "unique"}},
+                gpu_hourly_rate_override=None,
+                checkpoint_run_ts=run_ts,
+                resume_train=True,
+            )
+
+    assert resume_calls == [str(checkpoint)]
 
 
 def test_resolve_gpu_hourly_rate_uses_condition_value_without_cli_override() -> None:
@@ -1356,6 +1776,7 @@ def test_write_training_metadata_creates_expected_payload() -> None:
         "dataset_train_rows_total": 12,
         "dataset_val_rows_total": 4,
         "dataset_inference_rows_total": 24,
+        "training_units": [],
     }
 
 
@@ -2510,18 +2931,19 @@ def test_extract_speaker_embeddings_override_wins_over_config() -> None:
                 return object()
 
         with patch("tcc_audio.speaker_embeddings.load_encoder_classifier", return_value=FakeEncoderClassifier):
-            with patch(
-                "tcc_audio.speaker_embeddings.encode_audio_path",
-                return_value=np.arange(1, 193, dtype=np.float32),
-            ):
-                frame = extract_speaker_embeddings(
-                    speaker_selection_path=selection_path,
-                    out_index=out_index,
-                    out_dir=out_dir,
-                    config_path=config_path,
-                    model_name="override/model",
-                    expected_dim=192,
-                )
+            with patch("tcc_audio.speaker_embeddings.resolve_speechbrain_run_opts", return_value={"device": "cpu"}):
+                with patch(
+                    "tcc_audio.speaker_embeddings.encode_audio_path",
+                    return_value=np.arange(1, 193, dtype=np.float32),
+                ):
+                    frame = extract_speaker_embeddings(
+                        speaker_selection_path=selection_path,
+                        out_index=out_index,
+                        out_dir=out_dir,
+                        config_path=config_path,
+                        model_name="override/model",
+                        expected_dim=192,
+                    )
 
         assert calls["source"] == "override/model"
         assert calls["run_opts"] == {"device": "cpu"}
@@ -2583,15 +3005,43 @@ def test_compute_speaker_similarity_uses_configured_eval_model() -> None:
                 return object()
 
         with patch("tcc_audio.audio_metrics.load_encoder_classifier", return_value=FakeEncoderClassifier):
-            with patch(
-                "tcc_audio.audio_metrics.encode_audio_path",
-                side_effect=[np.array([1.0, 0.0], dtype=np.float32), np.array([1.0, 0.0], dtype=np.float32)],
-            ):
-                updated = compute_speaker_similarity(samples_path, samples_path, config_path=config_path)
+            with patch("tcc_audio.audio_metrics.resolve_speechbrain_run_opts", return_value={"device": "cpu"}):
+                with patch(
+                    "tcc_audio.audio_metrics.encode_audio_path",
+                    side_effect=[np.array([1.0, 0.0], dtype=np.float32), np.array([1.0, 0.0], dtype=np.float32)],
+                ):
+                    updated = compute_speaker_similarity(samples_path, samples_path, config_path=config_path)
 
         assert calls["source"] == "speechbrain/spkrec-ecapa-voxceleb"
         assert calls["run_opts"] == {"device": "cpu"}
         assert float(updated.loc[updated["sample_id"].eq("s1"), "speaker_similarity"].iloc[0]) == 1.0
+
+
+def test_device_resolution_prefers_cuda_then_mps_then_cpu() -> None:
+    fake_cuda_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: True),
+        backends=types.SimpleNamespace(mps=types.SimpleNamespace(is_available=lambda: True)),
+    )
+    fake_mps_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: False),
+        backends=types.SimpleNamespace(mps=types.SimpleNamespace(is_available=lambda: True)),
+    )
+    fake_cpu_torch = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: False),
+        backends=types.SimpleNamespace(mps=types.SimpleNamespace(is_available=lambda: False)),
+    )
+
+    with patch("tcc_audio.device._load_torch", return_value=fake_cuda_torch):
+        assert resolve_device_type() == "cuda"
+        assert resolve_speechbrain_run_opts() == {"device": "cuda:0"}
+
+    with patch("tcc_audio.device._load_torch", return_value=fake_mps_torch):
+        assert resolve_device_type() == "mps"
+        assert resolve_speechbrain_run_opts() == {"device": "mps"}
+
+    with patch("tcc_audio.device._load_torch", return_value=fake_cpu_torch):
+        assert resolve_device_type() == "cpu"
+        assert resolve_speechbrain_run_opts() == {"device": "cpu"}
 
 
 def test_build_training_args_uses_warmup_steps() -> None:
@@ -3262,7 +3712,8 @@ def test_speecht5_dataset_preserves_full_text_sequence() -> None:
     with patch(
         "tcc_audio.speecht5_runner._load_torch_stack",
         return_value={
-            "librosa": types.SimpleNamespace(load=lambda *args, **kwargs: (np.zeros(1600, dtype=np.float32), 16000)),
+            "librosa": types.SimpleNamespace(resample=lambda audio, **kwargs: audio),
+            "sf": types.SimpleNamespace(read=lambda *args, **kwargs: (np.zeros(1600, dtype=np.float32), 16000)),
             "Dataset": type("Dataset", (), {}),
         },
     ), patch(
@@ -3301,7 +3752,8 @@ def test_speecht5_dataset_normalizes_legacy_manifest_text() -> None:
     with patch(
         "tcc_audio.speecht5_runner._load_torch_stack",
         return_value={
-            "librosa": types.SimpleNamespace(load=lambda *args, **kwargs: (np.zeros(1600, dtype=np.float32), 16000)),
+            "librosa": types.SimpleNamespace(resample=lambda audio, **kwargs: audio),
+            "sf": types.SimpleNamespace(read=lambda *args, **kwargs: (np.zeros(1600, dtype=np.float32), 16000)),
             "Dataset": type("Dataset", (), {}),
         },
     ), patch(
@@ -3344,7 +3796,8 @@ def test_speecht5_dataset_preloads_speaker_embeddings_once_per_speaker() -> None
     with patch(
         "tcc_audio.speecht5_runner._load_torch_stack",
         return_value={
-            "librosa": types.SimpleNamespace(load=lambda *args, **kwargs: (np.zeros(1600, dtype=np.float32), 16000)),
+            "librosa": types.SimpleNamespace(resample=lambda audio, **kwargs: audio),
+            "sf": types.SimpleNamespace(read=lambda *args, **kwargs: (np.zeros(1600, dtype=np.float32), 16000)),
             "Dataset": type("Dataset", (), {}),
         },
     ), patch(
@@ -3613,6 +4066,10 @@ def test_metric_aggregation_contract() -> None:
     with TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         samples_path = tmp / "samples.csv"
+        audio_path = tmp / "audio.wav"
+        reference_audio = tmp / "reference.wav"
+        _write_wav(audio_path)
+        _write_wav(reference_audio)
         rows = []
         for checkpoint_label, speaker_id, wer, similarity, nisqa in [
             ("speecht5_lora_conservative@step500", "speaker_01", 0.31, 0.62, 3.1),
@@ -3629,8 +4086,8 @@ def test_metric_aggregation_contract() -> None:
                     "prompt_id": "P001",
                     "text_variant": "normalized",
                     "target_text": "Texto de teste.",
-                    "audio_path": "audio.wav",
-                    "reference_audio_path": "reference.wav",
+                    "audio_path": str(audio_path),
+                    "reference_audio_path": str(reference_audio),
                     "speaker_embedding_path": "embedding.npy",
                     "model_name": checkpoint_label,
                     "checkpoint_label": checkpoint_label,
@@ -3669,12 +4126,94 @@ def test_metric_aggregation_contract() -> None:
         assert (tmp / "evaluation/cost_by_speaker.csv").exists()
 
 
+def test_metric_aggregation_ignores_rows_without_audio_file() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        samples_path = tmp / "samples.csv"
+        audio_path = tmp / "audio.wav"
+        _write_wav(audio_path)
+        pd.DataFrame(
+            [
+                {
+                    "sample_id": "ok-row",
+                    "run_id": "base__speaker_01__P001__normalized",
+                    "condition": "cond_a",
+                    "speaker_id": "speaker_01",
+                    "prompt_id": "P001",
+                    "text_variant": "normalized",
+                    "target_text": "Texto de teste.",
+                    "audio_path": str(audio_path),
+                    "reference_audio_path": str(audio_path),
+                    "speaker_embedding_path": "embedding.npy",
+                    "model_name": "cond_a@step500",
+                    "checkpoint_label": "cond_a@step500",
+                    "checkpoint_step": "500",
+                    "checkpoint_path": "artifacts/checkpoints/cond_a@step500",
+                    "checkpoint_run_ts": "20260426T010203Z",
+                    "training_scope": "per_speaker",
+                    "training_unit": "speaker_01",
+                    "run_started_at": "",
+                    "run_finished_at": "",
+                    "failure_reason": "",
+                    "wer": 0.1,
+                    "speaker_similarity": 0.8,
+                    "nisqa": 3.5,
+                    "f0_rmse": 10.0,
+                    "rtf": 0.5,
+                    "train_gpu_hours": 0.1,
+                    "inference_seconds": 1.0,
+                    "cost_usd": 0.02,
+                    "status": "ok",
+                    "lora_gate_status": "stable_lora",
+                },
+                {
+                    "sample_id": "missing-audio",
+                    "run_id": "base__speaker_02__P001__normalized",
+                    "condition": "cond_a",
+                    "speaker_id": "speaker_02",
+                    "prompt_id": "P001",
+                    "text_variant": "normalized",
+                    "target_text": "Texto de teste.",
+                    "audio_path": str(tmp / "missing.wav"),
+                    "reference_audio_path": str(audio_path),
+                    "speaker_embedding_path": "embedding.npy",
+                    "model_name": "cond_a@step500",
+                    "checkpoint_label": "cond_a@step500",
+                    "checkpoint_step": "500",
+                    "checkpoint_path": "artifacts/checkpoints/cond_a@step500",
+                    "checkpoint_run_ts": "20260426T010203Z",
+                    "training_scope": "per_speaker",
+                    "training_unit": "speaker_02",
+                    "run_started_at": "",
+                    "run_finished_at": "",
+                    "failure_reason": "",
+                    "wer": 0.2,
+                    "speaker_similarity": 0.7,
+                    "nisqa": 3.0,
+                    "f0_rmse": 12.0,
+                    "rtf": 0.6,
+                    "train_gpu_hours": 0.1,
+                    "inference_seconds": 1.1,
+                    "cost_usd": 0.02,
+                    "status": "ok",
+                    "lora_gate_status": "stable_lora",
+                },
+            ]
+        ).to_csv(samples_path, index=False)
+        metrics, costs = aggregate_metrics(samples_path, tmp / "evaluation")
+        assert int(costs["samples"].sum()) == 1
+        base_row = metrics[(metrics["condition"] == "cond_a@step500") & (metrics["metric"] == "wer")].iloc[0]
+        assert int(base_row["n"]) == 1
+
+
 def test_wer_computation() -> None:
     assert word_error_rate("a voz ficou clara", "a voz ficou clara") == 0
     assert word_error_rate("a voz ficou clara", "a voz clara") == 0.25
     with TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         samples_path = tmp / "samples.csv"
+        audio_path = tmp / "audio.wav"
+        _write_wav(audio_path)
         pd.DataFrame(
             [
                 {
@@ -3685,7 +4224,7 @@ def test_wer_computation() -> None:
                     "prompt_id": "P001",
                     "text_variant": "normalized",
                     "target_text": "a voz ficou clara",
-                    "audio_path": "audio.wav",
+                    "audio_path": str(audio_path),
                     "reference_audio_path": "reference.wav",
                     "speaker_embedding_path": "embedding.npy",
                     "model_name": "speecht5_lora_conservative",
@@ -3708,7 +4247,46 @@ def test_wer_computation() -> None:
         ).to_csv(samples_path, index=False)
         computed = compute_wer_from_asr(samples_path, tmp / "samples_with_wer.csv")
         assert float(computed.loc[0, "wer"]) == 0
-        assert computed.loc[0, "status"] == "pending"
+        assert computed.loc[0, "status"] == "generated"
+
+
+def test_wer_requires_generated_audio_file() -> None:
+    with TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        samples_path = tmp / "samples.csv"
+        pd.DataFrame(
+            [
+                {
+                    "sample_id": "s1",
+                    "run_id": "r1",
+                    "condition": "speecht5_lora_conservative",
+                    "speaker_id": "speaker_01",
+                    "prompt_id": "P001",
+                    "text_variant": "normalized",
+                    "target_text": "a voz ficou clara",
+                    "audio_path": str(tmp / "missing.wav"),
+                    "reference_audio_path": "reference.wav",
+                    "speaker_embedding_path": "embedding.npy",
+                    "model_name": "speecht5_lora_conservative",
+                    "run_started_at": "",
+                    "run_finished_at": "",
+                    "failure_reason": "",
+                    "wer": "",
+                    "speaker_similarity": "",
+                    "nisqa": "",
+                    "f0_rmse": "",
+                    "rtf": "",
+                    "train_gpu_hours": "",
+                    "inference_seconds": "",
+                    "cost_usd": "",
+                    "status": "pending",
+                    "lora_gate_status": "",
+                    "asr_text": "a voz ficou clara",
+                }
+            ]
+        ).to_csv(samples_path, index=False)
+        computed = compute_wer_from_asr(samples_path, tmp / "samples_with_wer.csv")
+        assert computed.loc[0, "wer"] == ""
 
 
 def test_build_whisper_arg_parser_defaults_to_optional_paths() -> None:
@@ -3739,16 +4317,13 @@ def test_whisper_main_defaults_out_to_samples() -> None:
 
 
 def test_load_asr_pipeline_prefers_cuda() -> None:
-    fake_torch = types.ModuleType("torch")
-    fake_torch.cuda = types.SimpleNamespace(is_available=lambda: True)
-    fake_torch.backends = types.SimpleNamespace(mps=types.SimpleNamespace(is_available=lambda: True))
-    fake_torch.device = lambda name: f"device:{name}"
     fake_transformers = types.ModuleType("transformers")
     fake_pipeline = object()
     fake_transformers.pipeline = fake_pipeline
 
-    with patch.dict(sys.modules, {"torch": fake_torch, "transformers": fake_transformers}), patch(
-        "tcc_audio.whisper_batch.platform.system", return_value="Darwin"
+    with patch.dict(sys.modules, {"transformers": fake_transformers}), patch(
+        "tcc_audio.whisper_batch.resolve_transformers_pipeline_device",
+        return_value=0,
     ):
         pipeline_factory, device = _load_asr_pipeline()
 
@@ -3757,34 +4332,29 @@ def test_load_asr_pipeline_prefers_cuda() -> None:
 
 
 def test_load_asr_pipeline_uses_mps_on_macos_when_cuda_is_unavailable() -> None:
-    fake_torch = types.ModuleType("torch")
-    fake_torch.cuda = types.SimpleNamespace(is_available=lambda: False)
-    fake_torch.backends = types.SimpleNamespace(mps=types.SimpleNamespace(is_available=lambda: True))
-    fake_torch.device = lambda name: f"device:{name}"
     fake_transformers = types.ModuleType("transformers")
     fake_pipeline = object()
     fake_transformers.pipeline = fake_pipeline
+    fake_device = object()
 
-    with patch.dict(sys.modules, {"torch": fake_torch, "transformers": fake_transformers}), patch(
-        "tcc_audio.whisper_batch.platform.system", return_value="Darwin"
+    with patch.dict(sys.modules, {"transformers": fake_transformers}), patch(
+        "tcc_audio.whisper_batch.resolve_transformers_pipeline_device",
+        return_value=fake_device,
     ):
         pipeline_factory, device = _load_asr_pipeline()
 
     assert pipeline_factory is fake_pipeline
-    assert device == "device:mps"
+    assert device is fake_device
 
 
 def test_load_asr_pipeline_falls_back_to_cpu_without_cuda_or_mps() -> None:
-    fake_torch = types.ModuleType("torch")
-    fake_torch.cuda = types.SimpleNamespace(is_available=lambda: False)
-    fake_torch.backends = types.SimpleNamespace(mps=types.SimpleNamespace(is_available=lambda: False))
-    fake_torch.device = lambda name: f"device:{name}"
     fake_transformers = types.ModuleType("transformers")
     fake_pipeline = object()
     fake_transformers.pipeline = fake_pipeline
 
-    with patch.dict(sys.modules, {"torch": fake_torch, "transformers": fake_transformers}), patch(
-        "tcc_audio.whisper_batch.platform.system", return_value="Darwin"
+    with patch.dict(sys.modules, {"transformers": fake_transformers}), patch(
+        "tcc_audio.whisper_batch.resolve_transformers_pipeline_device",
+        return_value=-1,
     ):
         pipeline_factory, device = _load_asr_pipeline()
 
@@ -3931,10 +4501,11 @@ def test_run_whisper_batch_logs_progress_and_uses_generation_config(capsys) -> N
                 "tcc_audio.whisper_batch._load_asr_pipeline",
                 return_value=(lambda *args, **kwargs: DummyTranscriber(), types.SimpleNamespace(type="mps")),
             ),
+            patch("tcc_audio.whisper_batch.resolve_device_type", return_value="mps"),
             patch("tcc_audio.whisper_batch.load_samples", return_value=samples.copy()),
             patch("tcc_audio.whisper_batch.refresh_sample_status", side_effect=lambda frame: frame),
             patch(
-                "tcc_audio.whisper_batch._save_samples_atomic",
+                "tcc_audio.whisper_batch.save_samples_atomic",
                 side_effect=lambda frame, path: saved.update({"frame": frame.copy(), "path": path}),
             ),
         ):
@@ -4000,7 +4571,7 @@ def test_run_whisper_batch_saves_after_missing_audio(capsys) -> None:
             patch("tcc_audio.whisper_batch.load_samples", return_value=samples.copy()),
             patch("tcc_audio.whisper_batch.refresh_sample_status", side_effect=lambda frame: frame),
             patch(
-                "tcc_audio.whisper_batch._save_samples_atomic",
+                "tcc_audio.whisper_batch.save_samples_atomic",
                 side_effect=lambda frame, path: saved_frames.append(frame.copy()),
             ),
         ):
@@ -4065,7 +4636,7 @@ def test_run_whisper_batch_saves_after_transcriber_error(capsys) -> None:
             patch("tcc_audio.whisper_batch.load_samples", return_value=samples.copy()),
             patch("tcc_audio.whisper_batch.refresh_sample_status", side_effect=lambda frame: frame),
             patch(
-                "tcc_audio.whisper_batch._save_samples_atomic",
+                "tcc_audio.whisper_batch.save_samples_atomic",
                 side_effect=lambda frame, path: saved_frames.append(frame.copy()),
             ),
         ):

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+import tempfile
 from typing import Iterable
 
 import pandas as pd
@@ -34,6 +35,29 @@ def save_samples(samples: pd.DataFrame, path: str | Path) -> None:
     samples.to_csv(path, index=False)
 
 
+def save_samples_atomic(samples: pd.DataFrame, path: str | Path) -> None:
+    destination = Path(path)
+    ensure_parent_dir(destination)
+
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            newline="",
+            dir=destination.parent,
+            prefix=f".{destination.stem}_",
+            suffix=destination.suffix,
+            delete=False,
+        ) as handle:
+            samples.to_csv(handle, index=False)
+            tmp_path = Path(handle.name)
+        tmp_path.replace(destination)
+    finally:
+        if tmp_path is not None and tmp_path.exists():
+            tmp_path.unlink()
+
+
 def stringify_csv_value(value: object) -> str:
     if pd.isna(value):
         return ""
@@ -59,6 +83,18 @@ def refresh_sample_status(samples: pd.DataFrame) -> pd.DataFrame:
         completed_mask &= samples[column].astype(str).str.strip().ne("")
     samples.loc[completed_mask, "status"] = "ok"
     return samples
+
+
+def audio_exists_mask(samples: pd.DataFrame) -> pd.Series:
+    return samples["audio_path"].astype(str).apply(lambda value: Path(value).exists() if str(value).strip() else False)
+
+
+def metric_eligible_mask(samples: pd.DataFrame) -> pd.Series:
+    return (
+        samples["audio_path"].astype(str).str.strip().ne("")
+        & audio_exists_mask(samples)
+        & samples["failure_reason"].astype(str).str.strip().eq("")
+    )
 
 
 def resolve_path(path_str: str | Path, project_root: str | Path = ".") -> Path:

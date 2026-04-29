@@ -12,7 +12,7 @@ from scipy import stats
 
 from tcc_audio.cli_defaults import DEFAULT_EVALUATION_DIR, DEFAULT_SAMPLES_PATH, load_cli_config, resolve_evaluation_dir, resolve_samples_path
 from tcc_audio.io import ensure_parent_dir, read_csv
-from tcc_audio.runtime import load_samples
+from tcc_audio.runtime import audio_exists_mask, load_samples
 from tcc_audio.schema import EVAL_SAMPLES_REQUIRED_COLUMNS, NUMERIC_METRIC_COLUMNS
 
 METRIC_SUMMARY_COLUMNS = [
@@ -87,7 +87,7 @@ def aggregate_metrics(samples_path: str | Path, out_dir: str | Path | None = Non
     samples = load_samples(samples_path)
     _validate_samples(samples)
 
-    completed = samples[samples["status"].str.lower().eq("ok")].copy()
+    completed = samples[samples["status"].str.lower().eq("ok") & audio_exists_mask(samples)].copy()
     completed["analysis_condition"] = _analysis_condition(completed)
     for column in NUMERIC_METRIC_COLUMNS:
         completed[column] = pd.to_numeric(completed[column], errors="coerce")

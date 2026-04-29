@@ -19,16 +19,17 @@ import numpy as np
 import pandas as pd
 
 from tcc_audio.cli_defaults import DEFAULT_AUDIO_BASE_DIR
+from tcc_audio.device import resolve_device_type, resolve_torch_device
 from tcc_audio.io import ensure_parent_dir, read_csv, read_yaml
 from tcc_audio.runtime import (
     EmbeddingIndex,
     load_samples,
     now_utc_iso,
     refresh_sample_status,
-    save_samples,
+    save_samples_atomic,
     stringify_csv_value,
 )
-from tcc_audio.samples import materialize_checkpoint_samples, reset_condition_checkpoint_rows
+from tcc_audio.samples import materialize_checkpoint_samples
 from tcc_audio.speecht5_text import normalize_text_for_speecht5
 
 
@@ -101,6 +102,10 @@ class SpeechT5Context:
     vocoder: object
     torch: object
     sf: object
+    model_name: str
+    vocoder_name: str
+    device: str
+    active_checkpoint_path: str | None = None
 
 
 @dataclass
@@ -112,6 +117,15 @@ class CheckpointRecord:
     training_scope: str
     training_unit: str
     total_train_gpu_hours: float
+
+
+@dataclass
+class TrainingUnitState:
+    training_unit: str
+    status: str
+    checkpoint_path: str
+    best_checkpoint_path: str
+    train_gpu_hours: float
 
 
 def _path_safe_utc_timestamp() -> str:
@@ -172,6 +186,7 @@ def _write_training_metadata(
     dataset_train_rows_total: int,
     dataset_val_rows_total: int,
     dataset_inference_rows_total: int,
+    training_units: Iterable[TrainingUnitState] | None = None,
 ) -> None:
     payload = {
         "condition_id": condition_id,
@@ -186,9 +201,30 @@ def _write_training_metadata(
         "dataset_train_rows_total": dataset_train_rows_total,
         "dataset_val_rows_total": dataset_val_rows_total,
         "dataset_inference_rows_total": dataset_inference_rows_total,
+        "training_units": [
+            {
+                "training_unit": state.training_unit,
+                "status": state.status,
+                "checkpoint_path": state.checkpoint_path,
+                "best_checkpoint_path": state.best_checkpoint_path,
+                "train_gpu_hours": state.train_gpu_hours,
+            }
+            for state in (training_units or [])
+        ],
     }
     ensure_parent_dir(metadata_path)
     Path(metadata_path).write_text(json.dumps(payload, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+
+
+def _load_training_metadata(metadata_path: str | Path) -> dict[str, Any]:
+    path = Path(metadata_path)
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _resolve_lora_conditions(
@@ -300,7 +336,8 @@ def load_speecht5_context(model_name: str, vocoder_name: str, device: str | None
     processor = stack["SpeechT5Processor"].from_pretrained(model_name)
     model = stack["SpeechT5ForTextToSpeech"].from_pretrained(model_name)
     vocoder = stack["SpeechT5HifiGan"].from_pretrained(vocoder_name)
-    selected_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    resolved_device = device or str(resolve_torch_device())
+    selected_device = resolved_device
     model.to(selected_device)
     vocoder.to(selected_device)
     model.eval()
@@ -311,7 +348,32 @@ def load_speecht5_context(model_name: str, vocoder_name: str, device: str | None
         vocoder=vocoder,
         torch=torch,
         sf=stack["sf"],
+        model_name=model_name,
+        vocoder_name=vocoder_name,
+        device=selected_device,
     )
+
+
+def _activate_lora_checkpoint(context: SpeechT5Context, checkpoint_path: str | Path) -> None:
+    checkpoint = str(Path(checkpoint_path))
+    if context.active_checkpoint_path == checkpoint:
+        return
+
+    _, PeftModel, _ = _load_peft()
+    unload = getattr(context.model, "unload", None)
+    if callable(unload):
+        context.model = unload()
+    elif hasattr(context.model, "base_model") and hasattr(context.model.base_model, "model"):
+        context.model = context.model.base_model.model
+    elif getattr(context.model, "config", None) is None or context.active_checkpoint_path is not None:
+        stack = _load_torch_stack()
+        context.model = stack["SpeechT5ForTextToSpeech"].from_pretrained(context.model_name)
+        context.model.to(context.device)
+
+    context.model = PeftModel.from_pretrained(context.model, checkpoint)
+    context.model.to(context.device)
+    context.model.eval()
+    context.active_checkpoint_path = checkpoint
 
 
 def generate_speech_to_file(
@@ -356,9 +418,13 @@ def run_condition_inference(
     config_path: str | Path,
     samples_path: str | Path,
     condition_id: str,
-    checkpoint_dir: str | Path,
+    checkpoint_dir: str | Path | None = None,
     sample_ids: Iterable[str] | None = None,
     speaker_id: str | None = None,
+    checkpoint_step: int | None = None,
+    prompt_ids: Iterable[str] | None = None,
+    only_pending: bool = True,
+    force: bool = False,
     limit: int | None = None,
 ) -> pd.DataFrame:
     config = read_yaml(config_path)
@@ -367,54 +433,83 @@ def run_condition_inference(
         model_name=config["project"]["primary_model"],
         vocoder_name=config["project"]["vocoder_model"],
     )
-
-    checkpoint_path = Path(checkpoint_dir)
-    if not checkpoint_path.exists():
-        raise FileNotFoundError(f"Checkpoint path not found: {checkpoint_path}")
-    _, PeftModel, _ = _load_peft()
-    context.model = PeftModel.from_pretrained(context.model, str(checkpoint_path))
-    context.model.to(next(context.vocoder.parameters()).device)
-    context.model.eval()
-
     subset = samples[samples["condition"].eq(condition_id)].copy()
     if sample_ids is not None:
         subset = subset[subset["sample_id"].isin(list(sample_ids))].copy()
     if speaker_id:
         subset = subset[subset["speaker_id"].eq(speaker_id)].copy()
+    if checkpoint_step is not None:
+        subset = subset[subset["checkpoint_step"].astype(str).eq(str(checkpoint_step))].copy()
+    selected_prompts = {str(value).strip() for value in (prompt_ids or []) if str(value).strip()}
+    if selected_prompts:
+        subset = subset[subset["prompt_id"].isin(selected_prompts)].copy()
+    if checkpoint_dir is not None:
+        subset = subset[subset["checkpoint_path"].astype(str).eq(str(Path(checkpoint_dir)))].copy()
+    if force:
+        only_pending = False
+    if only_pending:
+        subset = subset[
+            subset["audio_path"].astype(str).apply(lambda value: not (str(value).strip() and Path(value).exists()))
+            | subset["status"].astype(str).str.lower().isin({"pending", "failed"})
+        ].copy()
     if limit:
         subset = subset.head(limit).copy()
     speaker_embedding_cache: dict[str, np.ndarray] = {}
+    if subset.empty:
+        samples = refresh_sample_status(samples)
+        save_samples_atomic(samples, samples_path)
+        return samples
 
-    for _, row in subset.iterrows():
-        sample_id = row["sample_id"]
-        started_at = now_utc_iso()
-        try:
-            inference_seconds, rtf = generate_speech_to_file(
-                context=context,
-                text=row["target_text"],
-                speaker_embedding_path=row["speaker_embedding_path"],
-                output_path=row["audio_path"],
-                sample_rate=int(config["data"].get("sample_rate", 16000)),
-                speaker_embedding_cache=speaker_embedding_cache,
-            )
-            sample_mask = samples["sample_id"].eq(sample_id)
-            samples.loc[sample_mask, "model_name"] = row["checkpoint_label"] or row["model_name"] or condition_id
-            samples.loc[sample_mask, "run_started_at"] = started_at
-            samples.loc[sample_mask, "run_finished_at"] = now_utc_iso()
-            samples.loc[sample_mask, "failure_reason"] = ""
-            samples.loc[sample_mask, "inference_seconds"] = stringify_csv_value(inference_seconds)
-            samples.loc[sample_mask, "rtf"] = stringify_csv_value(rtf)
-            samples.loc[sample_mask, "status"] = "generated"
-            samples.loc[sample_mask, "lora_gate_status"] = "stable_lora"
-        except Exception as exc:  # pragma: no cover - runtime integration path
-            sample_mask = samples["sample_id"].eq(sample_id)
-            samples.loc[sample_mask, "run_started_at"] = started_at
-            samples.loc[sample_mask, "run_finished_at"] = now_utc_iso()
-            samples.loc[sample_mask, "failure_reason"] = str(exc)
-            samples.loc[sample_mask, "status"] = "failed"
+    reconciled_mask = subset["audio_path"].astype(str).apply(lambda value: Path(value).exists() if str(value).strip() else False)
+    for _, row in subset[reconciled_mask].iterrows():
+        sample_mask = samples["sample_id"].eq(row["sample_id"])
+        samples.loc[sample_mask, "model_name"] = row["checkpoint_label"] or row["model_name"] or condition_id
+        samples.loc[sample_mask, "failure_reason"] = ""
+        samples.loc[sample_mask, "status"] = "generated"
+        samples.loc[sample_mask, "lora_gate_status"] = "stable_lora"
+    samples = refresh_sample_status(samples)
+    save_samples_atomic(samples, samples_path)
+    subset = subset[~reconciled_mask].copy()
+
+    for checkpoint_path, checkpoint_rows in subset.groupby("checkpoint_path", dropna=False):
+        if not str(checkpoint_path).strip():
+            continue
+        checkpoint = Path(str(checkpoint_path))
+        if not checkpoint.exists():
+            raise FileNotFoundError(f"Checkpoint path not found: {checkpoint}")
+        _activate_lora_checkpoint(context, checkpoint)
+        for _, row in checkpoint_rows.iterrows():
+            sample_id = row["sample_id"]
+            started_at = now_utc_iso()
+            try:
+                inference_seconds, rtf = generate_speech_to_file(
+                    context=context,
+                    text=row["target_text"],
+                    speaker_embedding_path=row["speaker_embedding_path"],
+                    output_path=row["audio_path"],
+                    sample_rate=int(config["data"].get("sample_rate", 16000)),
+                    speaker_embedding_cache=speaker_embedding_cache,
+                )
+                sample_mask = samples["sample_id"].eq(sample_id)
+                samples.loc[sample_mask, "model_name"] = row["checkpoint_label"] or row["model_name"] or condition_id
+                samples.loc[sample_mask, "run_started_at"] = started_at
+                samples.loc[sample_mask, "run_finished_at"] = now_utc_iso()
+                samples.loc[sample_mask, "failure_reason"] = ""
+                samples.loc[sample_mask, "inference_seconds"] = stringify_csv_value(inference_seconds)
+                samples.loc[sample_mask, "rtf"] = stringify_csv_value(rtf)
+                samples.loc[sample_mask, "status"] = "generated"
+                samples.loc[sample_mask, "lora_gate_status"] = "stable_lora"
+            except Exception as exc:  # pragma: no cover - runtime integration path
+                sample_mask = samples["sample_id"].eq(sample_id)
+                samples.loc[sample_mask, "run_started_at"] = started_at
+                samples.loc[sample_mask, "run_finished_at"] = now_utc_iso()
+                samples.loc[sample_mask, "failure_reason"] = str(exc)
+                samples.loc[sample_mask, "status"] = "failed"
+            samples = refresh_sample_status(samples)
+            save_samples_atomic(samples, samples_path)
 
     samples = refresh_sample_status(samples)
-    save_samples(samples, samples_path)
+    save_samples_atomic(samples, samples_path)
     return samples
 
 
@@ -436,29 +531,37 @@ def _build_dataset(
     expected_dim: int = 512,
 ):
     stack = _load_torch_stack()
-    librosa = stack["librosa"]
     Dataset = stack["Dataset"]
+    sf = stack["sf"]
+    librosa = stack["librosa"]
     speaker_embedding_cache = _preload_speaker_embedding_cache(speaker_embedding_map, expected_dim=expected_dim)
-
-    def _resolve_training_text(row: pd.Series) -> str:
-        normalized_text = str(row.get("target_text_speecht5", "")).strip()
-        if normalized_text:
-            return normalize_text_for_speecht5(normalized_text)
-        return normalize_text_for_speecht5(row["target_text"])
 
     class SpeechT5TTSDataset(Dataset):
         def __init__(self, frame: pd.DataFrame, processor):
-            self.frame = frame.reset_index(drop=True)
+            self.frame = frame.reset_index(drop=True).copy()
             self.processor = processor
+            self.texts = [
+                normalize_text_for_speecht5(str(text).strip() or fallback)
+                for text, fallback in zip(
+                    self.frame.get("target_text_speecht5", pd.Series([""] * len(self.frame), dtype=str)).astype(str),
+                    self.frame["target_text"].astype(str),
+                    strict=False,
+                )
+            ]
 
         def __len__(self) -> int:
             return len(self.frame)
 
         def __getitem__(self, index: int) -> dict[str, object]:
             row = self.frame.iloc[index]
-            audio, _ = librosa.load(row["audio_path"], sr=sample_rate)
+            audio, native_sample_rate = sf.read(str(row["audio_path"]), dtype="float32", always_2d=False)
+            audio = np.asarray(audio, dtype=np.float32)
+            if audio.ndim > 1:
+                audio = audio.mean(axis=1)
+            if native_sample_rate != sample_rate:
+                audio = librosa.resample(audio, orig_sr=native_sample_rate, target_sr=sample_rate)
             processed = self.processor(
-                text=_resolve_training_text(row),
+                text=self.texts[index],
                 audio_target=audio,
                 sampling_rate=sample_rate,
                 return_attention_mask=False,
@@ -536,12 +639,18 @@ def _iter_training_units(
     train_rows: pd.DataFrame,
     val_rows: pd.DataFrame,
     scope: str,
+    selected_speaker_ids: Iterable[str] | None = None,
 ) -> list[tuple[str, pd.DataFrame, pd.DataFrame]]:
+    selected = {str(value).strip() for value in (selected_speaker_ids or []) if str(value).strip()}
     if scope == "unique":
+        if selected:
+            raise ValueError("Speaker filters are not supported for training.scope=unique.")
         return [("unique", train_rows.copy(), val_rows.copy())]
 
     units = []
     for speaker_id in sorted(train_rows["speaker_id"].unique()):
+        if selected and str(speaker_id) not in selected:
+            continue
         speaker_train = train_rows[train_rows["speaker_id"].eq(speaker_id)].copy()
         speaker_val = val_rows[val_rows["speaker_id"].eq(speaker_id)].copy()
         if speaker_train.empty:
@@ -672,6 +781,9 @@ def _build_training_args(
         )
 
     cuda_available = bool(torch.cuda.is_available())
+    mps_backend = getattr(getattr(torch, "backends", None), "mps", None)
+    mps_available = bool(getattr(mps_backend, "is_available", lambda: False)())
+    accelerator_available = cuda_available or mps_available
     fp16_requested = bool(training_config.get("fp16", False))
     bf16_requested = bool(training_config.get("bf16", False))
     if fp16_requested and bf16_requested:
@@ -710,7 +822,13 @@ def _build_training_args(
         "fp16": bool(cuda_available and fp16_requested),
         "bf16": bool(cuda_available and bf16_requested and "bf16" in fields),
         "dataloader_pin_memory": cuda_available,
+        "dataloader_num_workers": int(training_config.get("dataloader_num_workers", 0)),
+        "use_cpu": not accelerator_available,
     }
+    if kwargs["dataloader_num_workers"] > 0:
+        kwargs["dataloader_persistent_workers"] = bool(training_config.get("dataloader_persistent_workers", True))
+        if training_config.get("dataloader_prefetch_factor") not in (None, ""):
+            kwargs["dataloader_prefetch_factor"] = int(training_config["dataloader_prefetch_factor"])
 
     if training_config.get("save_total_limit") not in (None, ""):
         print(
@@ -802,14 +920,174 @@ def _build_trainer(
     return stack["Seq2SeqTrainer"](**trainer_kwargs)
 
 
+def _condition_run_dirs(checkpoint_dir: str | Path, condition_id: str) -> list[Path]:
+    root = Path(checkpoint_dir) / condition_id
+    if not root.exists():
+        return []
+    return sorted([path for path in root.iterdir() if path.is_dir()], key=lambda path: path.name)
+
+
+def _resolve_run_ts(
+    checkpoint_dir: str | Path,
+    condition_id: str,
+    *,
+    resume_train: bool,
+    checkpoint_run_ts: str | None,
+) -> str:
+    if checkpoint_run_ts:
+        return checkpoint_run_ts
+    run_dirs = _condition_run_dirs(checkpoint_dir, condition_id)
+    if resume_train and run_dirs:
+        return run_dirs[-1].name
+    return _path_safe_utc_timestamp()
+
+
+def _latest_checkpoint_dir(output_dir: str | Path) -> Path | None:
+    checkpoints = _checkpoint_dirs(output_dir)
+    return checkpoints[-1] if checkpoints else None
+
+
+def _best_checkpoint_dir(output_dir: str | Path) -> Path | None:
+    latest = _latest_checkpoint_dir(output_dir)
+    if latest is None:
+        return None
+    trainer_state_path = latest / "trainer_state.json"
+    if trainer_state_path.exists():
+        try:
+            trainer_state = json.loads(trainer_state_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            trainer_state = {}
+        best_model_checkpoint = trainer_state.get("best_model_checkpoint")
+        if isinstance(best_model_checkpoint, str) and best_model_checkpoint.strip():
+            candidate = Path(best_model_checkpoint)
+            if not candidate.is_absolute():
+                candidate = Path(output_dir) / candidate
+            if candidate.exists():
+                return candidate
+    return latest
+
+
+def _unit_final_model_exists(output_dir: str | Path) -> bool:
+    return (Path(output_dir) / "adapter_model.safetensors").exists()
+
+
+def _build_training_unit_state(
+    training_unit: str,
+    output_dir: str | Path,
+    elapsed_hours: float,
+    *,
+    status: str,
+) -> TrainingUnitState:
+    latest_checkpoint = _latest_checkpoint_dir(output_dir)
+    best_checkpoint = _best_checkpoint_dir(output_dir)
+    return TrainingUnitState(
+        training_unit=training_unit,
+        status=status,
+        checkpoint_path=str(latest_checkpoint or ""),
+        best_checkpoint_path=str(best_checkpoint or ""),
+        train_gpu_hours=float(elapsed_hours),
+    )
+
+
+def _training_unit_state_map(metadata_path: str | Path) -> dict[str, TrainingUnitState]:
+    payload = _load_training_metadata(metadata_path)
+    output: dict[str, TrainingUnitState] = {}
+    for raw_state in payload.get("training_units", []):
+        if not isinstance(raw_state, Mapping):
+            continue
+        training_unit = str(raw_state.get("training_unit", "")).strip()
+        if not training_unit:
+            continue
+        output[training_unit] = TrainingUnitState(
+            training_unit=training_unit,
+            status=str(raw_state.get("status", "")),
+            checkpoint_path=str(raw_state.get("checkpoint_path", "")),
+            best_checkpoint_path=str(raw_state.get("best_checkpoint_path", "")),
+            train_gpu_hours=float(raw_state.get("train_gpu_hours", 0.0) or 0.0),
+        )
+    return output
+
+
+def materialize_condition_samples(
+    *,
+    config_path: str | Path,
+    samples_path: str | Path,
+    run_matrix_path: str | Path,
+    checkpoint_dir: str | Path,
+    condition: Mapping[str, Any],
+    checkpoint_run_ts: str | None,
+    best_only: bool = True,
+    checkpoint_steps: Iterable[int] | None = None,
+    speaker_ids: Iterable[str] | None = None,
+    prompt_ids: Iterable[str] | None = None,
+    audio_base_dir: str | Path = DEFAULT_AUDIO_BASE_DIR,
+    gpu_hourly_rate_override: float | None = None,
+) -> list[str]:
+    condition_id = str(condition["id"])
+    training_scope = _training_scope(condition)
+    resolved_run_ts = _resolve_run_ts(
+        checkpoint_dir,
+        condition_id,
+        resume_train=True,
+        checkpoint_run_ts=checkpoint_run_ts,
+    )
+    training_units_state = _training_unit_state_map(_training_metadata_path(checkpoint_dir, condition_id, resolved_run_ts))
+    if training_scope == "unique":
+        unit_names = ["unique"]
+    else:
+        run_root = _build_condition_run_root(checkpoint_dir, condition_id, resolved_run_ts)
+        fallback_unit_names = [path.name for path in run_root.iterdir() if path.is_dir()] if run_root.exists() else []
+        unit_names = sorted(training_units_state) if training_units_state else fallback_unit_names
+
+    selected_steps = {int(step) for step in (checkpoint_steps or [])}
+    selected_sample_ids: list[str] = []
+    config = read_yaml(config_path)
+    for training_unit in unit_names:
+        output_dir = _build_checkpoint_root(checkpoint_dir, condition_id, resolved_run_ts, training_unit)
+        if not output_dir.exists():
+            continue
+        state = training_units_state.get(training_unit)
+        checkpoint_paths: list[Path] = []
+        if best_only and not selected_steps:
+            best_checkpoint = _best_checkpoint_dir(output_dir)
+            if best_checkpoint is not None:
+                checkpoint_paths = [best_checkpoint]
+        else:
+            checkpoint_paths = _checkpoint_dirs(output_dir)
+            if selected_steps:
+                checkpoint_paths = [path for path in checkpoint_paths if _checkpoint_step(path) in selected_steps]
+
+        for checkpoint_path in checkpoint_paths:
+            sample_ids = materialize_checkpoint_samples(
+                samples_path=samples_path,
+                run_matrix_path=run_matrix_path,
+                condition_id=condition_id,
+                checkpoint_step=_checkpoint_step(checkpoint_path),
+                checkpoint_path=checkpoint_path,
+                checkpoint_run_ts=resolved_run_ts,
+                training_scope=training_scope,
+                training_unit=training_unit,
+                audio_base_dir=audio_base_dir,
+                total_train_gpu_hours=(state.train_gpu_hours if state is not None else 0.0),
+                gpu_hourly_rate=_resolve_gpu_hourly_rate(condition, cli_override=gpu_hourly_rate_override),
+                speaker_selection_path=config["data"].get("speaker_selection_path"),
+                speaker_embeddings_path=config["data"].get("speaker_embeddings_index"),
+                speaker_ids=speaker_ids,
+                prompt_ids=prompt_ids,
+            )
+            selected_sample_ids.extend(sample_ids)
+    return selected_sample_ids
+
+
 def _train_condition(
     config_path: str | Path,
     manifest_path: str | Path,
-    samples_path: str | Path,
     checkpoint_dir: str | Path,
     condition: Mapping[str, Any],
     gpu_hourly_rate_override: float | None,
-    audio_base_dir: str | Path,
+    checkpoint_run_ts: str | None = None,
+    resume_train: bool = False,
+    speaker_ids: Iterable[str] | None = None,
 ) -> pd.DataFrame:
     config = read_yaml(config_path)
     manifest = read_csv(manifest_path)
@@ -817,8 +1095,12 @@ def _train_condition(
     training_scope = _training_scope(condition)
     training_config = dict(condition.get("training", {}))
     lora_config = dict(condition.get("lora", {}))
-    gpu_hourly_rate = _resolve_gpu_hourly_rate(condition, cli_override=gpu_hourly_rate_override)
-    run_ts = _path_safe_utc_timestamp()
+    run_ts = _resolve_run_ts(
+        checkpoint_dir,
+        condition_id,
+        resume_train=resume_train,
+        checkpoint_run_ts=checkpoint_run_ts,
+    )
     condition_run_root = _build_condition_run_root(checkpoint_dir, condition_id, run_ts)
     condition_run_root.mkdir(parents=True, exist_ok=True)
     log_path = _training_log_path(checkpoint_dir, condition_id, run_ts)
@@ -826,9 +1108,6 @@ def _train_condition(
 
     train_rows = manifest[manifest["split"].eq("train")].copy()
     val_rows = manifest[manifest["split"].eq("val")].copy()
-
-    samples = reset_condition_checkpoint_rows(load_samples(samples_path), condition_id)
-    save_samples(samples, samples_path)
 
     sample_rate = int(config["data"].get("sample_rate", 16000))
     project_config = config.get("project", {})
@@ -840,27 +1119,33 @@ def _train_condition(
     stack = _load_training_stack()
     processor = stack["SpeechT5Processor"].from_pretrained(config["project"]["primary_model"])
     speaker_embedding_map = _prepare_speaker_embedding_map(config["data"]["speaker_embeddings_index"])
-    dataset_class = _build_dataset(
-        manifest,
-        speaker_embedding_map,
-        sample_rate,
-        expected_dim=expected_speaker_embedding_dim,
-    )
+    dataset_class = _build_dataset(manifest, speaker_embedding_map, sample_rate, expected_dim=expected_speaker_embedding_dim)
     run_started_at = now_utc_iso()
     run_started_perf = time.perf_counter()
     training_units_total = 0
     checkpoints_total = 0
-    dataset_inference_rows_total = 0
     training_gpu_hours_total = 0.0
+    existing_states = _training_unit_state_map(metadata_path)
+    training_unit_states: dict[str, TrainingUnitState] = dict(existing_states)
+    units = _iter_training_units(train_rows, val_rows, training_scope, selected_speaker_ids=speaker_ids)
 
     with _tee_console_output(log_path):
-        for training_unit, unit_train_rows, unit_val_rows in _iter_training_units(train_rows, val_rows, training_scope):
+        for training_unit, unit_train_rows, unit_val_rows in units:
             training_units_total += 1
-            model = stack["SpeechT5ForTextToSpeech"].from_pretrained(config["project"]["primary_model"])
-            model = _apply_lora_adapter(model, lora_config)
-
             output_dir = _build_checkpoint_root(checkpoint_dir, condition_id, run_ts, training_unit)
             output_dir.mkdir(parents=True, exist_ok=True)
+            if resume_train and _unit_final_model_exists(output_dir):
+                state = training_unit_states.get(training_unit)
+                training_unit_states[training_unit] = state or _build_training_unit_state(
+                    training_unit,
+                    output_dir,
+                    0.0,
+                    status="trained",
+                )
+                continue
+
+            model = stack["SpeechT5ForTextToSpeech"].from_pretrained(config["project"]["primary_model"])
+            model = _apply_lora_adapter(model, lora_config)
 
             training_args = _build_training_args(
                 stack=stack,
@@ -886,7 +1171,11 @@ def _train_condition(
                 phase="train:start",
             )
             started = time.perf_counter()
-            trainer.train()
+            latest_checkpoint = _latest_checkpoint_dir(output_dir) if resume_train else None
+            if latest_checkpoint is not None:
+                trainer.train(resume_from_checkpoint=str(latest_checkpoint))
+            else:
+                trainer.train()
             elapsed_hours = (time.perf_counter() - started) / 3600.0
             training_gpu_hours_total += elapsed_hours
             trainer.save_model()
@@ -902,32 +1191,19 @@ def _train_condition(
             checkpoints_total += len(checkpoints)
             if not checkpoints:
                 print(f"Warning: no checkpoints were saved for `{condition_id}` training unit `{training_unit}`.")
+                training_unit_states[training_unit] = _build_training_unit_state(
+                    training_unit,
+                    output_dir,
+                    elapsed_hours,
+                    status="training",
+                )
                 continue
-
-            for checkpoint in checkpoints:
-                checkpoint_step = _checkpoint_step(checkpoint)
-                sample_ids = materialize_checkpoint_samples(
-                    samples_path=samples_path,
-                    condition_id=condition_id,
-                    checkpoint_step=checkpoint_step,
-                    checkpoint_path=checkpoint,
-                    checkpoint_run_ts=run_ts,
-                    training_scope=training_scope,
-                    training_unit=training_unit,
-                    audio_base_dir=audio_base_dir,
-                    total_train_gpu_hours=elapsed_hours,
-                    gpu_hourly_rate=gpu_hourly_rate,
-                )
-                dataset_inference_rows_total += len(sample_ids)
-                if not sample_ids:
-                    continue
-                run_condition_inference(
-                    config_path=config_path,
-                    samples_path=samples_path,
-                    condition_id=condition_id,
-                    checkpoint_dir=checkpoint,
-                    sample_ids=sample_ids,
-                )
+            training_unit_states[training_unit] = _build_training_unit_state(
+                training_unit,
+                output_dir,
+                elapsed_hours,
+                status="trained",
+            )
 
     run_finished_at = now_utc_iso()
     training_seconds = time.perf_counter() - run_started_perf
@@ -944,46 +1220,60 @@ def _train_condition(
         checkpoints_total=checkpoints_total,
         dataset_train_rows_total=len(train_rows),
         dataset_val_rows_total=len(val_rows),
-        dataset_inference_rows_total=dataset_inference_rows_total,
+        dataset_inference_rows_total=0,
+        training_units=training_unit_states.values(),
     )
-
-    return load_samples(samples_path)
+    return pd.DataFrame(
+        [
+            {
+                "training_unit": state.training_unit,
+                "status": state.status,
+                "checkpoint_path": state.checkpoint_path,
+                "best_checkpoint_path": state.best_checkpoint_path,
+                "train_gpu_hours": state.train_gpu_hours,
+            }
+            for state in training_unit_states.values()
+        ]
+    )
 
 
 def run_lora_pipeline(
     config_path: str | Path,
     manifest_path: str | Path,
-    samples_path: str | Path,
     checkpoint_dir: str | Path,
     gpu_hourly_rate: float | None = None,
     condition_ids: Iterable[str] | None = None,
-    audio_base_dir: str | Path = "artifacts/audio",
+    checkpoint_run_ts: str | None = None,
+    resume_train: bool = False,
+    speaker_ids: Iterable[str] | None = None,
 ) -> pd.DataFrame:
     config = read_yaml(config_path)
     conditions = _resolve_lora_conditions(config, condition_ids)
     if not conditions:
         raise ValueError("No LoRA conditions found in the experiment config.")
 
+    frames: list[pd.DataFrame] = []
     for condition in conditions:
-        _train_condition(
-            config_path=config_path,
-            manifest_path=manifest_path,
-            samples_path=samples_path,
-            checkpoint_dir=checkpoint_dir,
-            condition=condition,
-            gpu_hourly_rate_override=gpu_hourly_rate,
-            audio_base_dir=audio_base_dir,
+        frames.append(
+            _train_condition(
+                config_path=config_path,
+                manifest_path=manifest_path,
+                checkpoint_dir=checkpoint_dir,
+                condition=condition,
+                gpu_hourly_rate_override=gpu_hourly_rate,
+                checkpoint_run_ts=checkpoint_run_ts,
+                resume_train=resume_train,
+                speaker_ids=speaker_ids,
+            )
         )
-    return load_samples(samples_path)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 def build_lora_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run the SpeechT5 LoRA checkpoint-evaluation pipeline.")
+    parser = argparse.ArgumentParser(description="Run SpeechT5 LoRA training.")
     parser.add_argument("-c", "--config")
-    parser.add_argument("-s", "--samples")
     parser.add_argument("-m", "--manifest")
     parser.add_argument("-k", "--checkpoint-dir")
-    parser.add_argument("-a", "--audio-base-dir", default=str(DEFAULT_AUDIO_BASE_DIR))
     parser.add_argument(
         "-C",
         "--condition",
@@ -998,4 +1288,7 @@ def build_lora_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional global override for training.gpu_hourly_rate defined in each LoRA condition.",
     )
+    parser.add_argument("--resume-train", action="store_true", help="Resume from the latest saved checkpoint for the run.")
+    parser.add_argument("--checkpoint-run-ts", help="Existing checkpoint run timestamp to resume.")
+    parser.add_argument("--speaker-id", action="append", default=[], help="Optional per-speaker training filter.")
     return parser

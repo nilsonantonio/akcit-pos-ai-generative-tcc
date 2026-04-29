@@ -14,7 +14,8 @@ O repositório cobre o ciclo completo:
 - preparação e curadoria do dataset
 - seleção de speakers e montagem de manifesto
 - treino `LoRA`
-- geração de áudio por checkpoint salvo
+- materialização de checkpoints no ledger
+- geração de áudio a partir do ledger materializado
 - cálculo de métricas automáticas
 - agregação de resultados
 - geração de assets para relatório
@@ -100,18 +101,19 @@ O fluxo ponta a ponta é:
 4. `seleção de speakers`: escolher speakers globais por duração disponível
 5. `embeddings`: materializar embeddings de síntese por speaker
 6. `run matrix`: expandir a configuração YAML em execuções concretas
-7. `ledger de samples`: criar o `samples.csv`, que será enriquecido ao longo do pipeline
-8. `treino LoRA`: treinar cada condição e salvar checkpoints
-9. `geração por checkpoint`: sintetizar áudio para cada checkpoint materializado
-10. `métricas`: rodar `Whisper`, `WER`, `speaker similarity`, `NISQA`, `F0 RMSE`, custo e latência
-11. `agregação`: resumir os resultados por condição analítica
-12. `report/app`: gerar assets e abrir a comparação qualitativa entre checkpoints
+7. `ledger de samples`: criar um `samples.csv` vazio, reservado para linhas materializadas
+8. `treino LoRA`: treinar cada condição e salvar checkpoints, com suporte a `resume`
+9. `materialização`: registrar no `samples.csv` o checkpoint padrão de cada unidade de treino
+10. `inferência`: sintetizar áudio apenas para as linhas materializadas, com `resume`
+11. `métricas`: rodar `Whisper`, `WER`, `speaker similarity`, `NISQA`, `F0 RMSE`, custo e latência
+12. `agregação`: resumir os resultados por condição analítica
+13. `report/app`: gerar assets e abrir a comparação qualitativa entre checkpoints
 
 A forma operacional mínima desse fluxo, com os CLIs reduzidos e as sobrescritas separadas, está documentada em [MANUAL_EXECUCAO.md](MANUAL_EXECUCAO.md).
 
 A unidade analítica principal do framework é `checkpoint_label=<condicao>@step<k>`.
 
-Isso é importante porque o projeto não assume que "o último checkpoint é o melhor". Cada checkpoint salvo pode ser tratado como um braço comparável do experimento. Essa escolha permite:
+Isso é importante porque o projeto não assume que "o último checkpoint é o melhor". Cada checkpoint salvo pode ser tratado como um braço comparável do experimento. No pipeline canônico, porém, a geração e a avaliação padrão usam apenas o melhor checkpoint por unidade de treino; os demais checkpoints ficam como variante avançada. Essa escolha permite:
 
 - observar a trajetória de aprendizagem
 - detectar overfitting antes do final do treino
@@ -207,7 +209,7 @@ Saída:
 
 Consumido por:
 
-- inicialização do `samples.csv`
+- materialização do `samples.csv`
 - inferência de TTS
 
 ### `artifacts/checkpoints/`
@@ -222,7 +224,8 @@ Saída:
 
 Consumido por:
 
-- geração de áudio por checkpoint
+- materialização do checkpoint padrão por unidade de treino
+- geração de áudio a partir do ledger materializado
 - comparação analítica entre estados intermediários do treino
 
 ### `artifacts/audio/`
@@ -364,9 +367,17 @@ Expansão do YAML em execuções concretas. Aqui o desenho experimental vira lin
 
 ### `samples.csv`
 
-Ledger incremental do experimento. Este é o arquivo central do framework.
+Ledger central do experimento. Este é o arquivo principal para inspecionar o estado da execução.
 
-Ele começa com linhas base por run e vai sendo enriquecido com:
+Ele não carrega mais linhas base. Cada linha já nasce materializada, isto é, com uma combinação concreta de:
+
+- `condition`
+- `speaker_id`
+- `prompt_id`
+- `checkpoint_run_ts`
+- `checkpoint_step`
+
+Depois da materialização, o mesmo arquivo é enriquecido com:
 
 - `checkpoint_label`
 - caminhos de áudio
@@ -460,19 +471,28 @@ Isso torna o desenho explícito e auditável. Você consegue inspecionar o exper
 
 ### 8. Inicializar o ledger de samples
 
-`samples.csv` nasce antes da inferência para funcionar como ledger do experimento. O pipeline não trata samples como efeitos colaterais dispersos; ele os trata como entidades rastreáveis.
+`samples.csv` nasce vazio, com schema estável, para funcionar como ledger de execuções materializadas. O pipeline não trata samples como efeitos colaterais dispersos; ele os trata como entidades rastreáveis.
 
 ### 9. Treinar LoRA e salvar checkpoints
 
-Cada condição `LoRA` é treinada conforme o YAML. O treino salva checkpoints em passos definidos, e cada checkpoint passa a ser um candidato real de avaliação.
+Cada condição `LoRA` é treinada conforme o YAML. O treino salva checkpoints em passos definidos, e a retomada reutiliza o último `checkpoint-*` salvo da unidade corrente quando `resume` é solicitado.
 
 `training.gpu_hourly_rate` também é definido por condicional no YAML. O parâmetro `--gpu-hourly-rate` do entrypoint existe apenas como sobrescrita global opcional da execução.
 
-### 10. Materializar áudio por checkpoint
+### 10. Materializar checkpoints no ledger
 
-Quando um checkpoint é salvo, o pipeline gera áudio com ele e preenche novas linhas no ledger. Isso transforma o histórico do treino em um conjunto comparável de saídas.
+O pipeline canônico materializa apenas o checkpoint padrão de cada unidade de treino:
 
-### 11. Rodar ASR e métricas
+- `per_speaker`: melhor checkpoint por speaker
+- `unique`: melhor checkpoint da unidade `unique`
+
+Isso transforma o histórico do treino em um conjunto rastreável de linhas concretas, sem misturar plano experimental com execução real.
+
+### 11. Gerar áudio com resume
+
+A inferência opera sobre o `samples.csv` materializado. Antes de gerar, ela reconcilia WAVs já existentes e retoma apenas o que estiver pendente.
+
+### 12. Rodar ASR e métricas
 
 Depois da síntese:
 
@@ -483,11 +503,13 @@ Depois da síntese:
 - `F0 RMSE` mede desvio de pitch
 - `RTF`, custo e horas de GPU completam a visão operacional
 
-### 12. Agregar e comparar
+Todas as métricas canônicas partem das linhas com áudio realmente existente. No caso do `WER`, isso também é obrigatório.
+
+### 13. Agregar e comparar
 
 O agregador trabalha sobre `analysis_condition`, que prioriza `checkpoint_label` quando ele existe. Na prática, isso significa que a comparação principal não é apenas entre "condições", mas entre checkpoints concretos.
 
-### 13. Gerar relatório e abrir a demo
+### 14. Gerar relatório e abrir a demo
 
 O fim do pipeline produz:
 
@@ -825,8 +847,8 @@ Se a sua meta for apenas testar novas condições `LoRA`, pense no ciclo abaixo:
 1. editar o bloco `conditions:` do YAML
 2. regenerar `run_matrix.csv`
 3. inicializar ou reutilizar `samples.csv`
-4. treinar e materializar checkpoints
-5. comparar checkpoints nas métricas e no app
+4. treinar, materializar o checkpoint padrão e gerar áudio
+5. comparar checkpoints nas métricas e no app, ou expandir para todos os checkpoints quando isso fizer sentido
 
 Para os comandos concretos de cada etapa, use [MANUAL_EXECUCAO.md](MANUAL_EXECUCAO.md) como fonte operacional primária.
 

@@ -15,12 +15,15 @@ O fluxo oficial do repositório é:
 3. preprocessar audio
 4. selecionar speakers e validar manifesto
 5. extrair embeddings
-6. gerar `run_matrix.csv` e `samples.csv`
-7. treinar `SpeechT5 LoRA` e materializar checkpoints
-8. rodar métricas automáticas
-9. agregar resultados
-10. gerar `report_assets/`
-11. abrir a demo Gradio
+6. gerar `run_matrix.csv`
+7. inicializar `samples.csv` vazio
+8. treinar `SpeechT5 LoRA`
+9. materializar no `samples.csv` apenas o checkpoint padrão de cada unidade de treino
+10. gerar audio com resume
+11. rodar `Whisper` e métricas automáticas
+12. agregar resultados
+13. gerar `report_assets/`
+14. abrir a demo Gradio
 
 Este manual prioriza o caminho feliz: primeiro os comandos mínimos do pipeline canônico, depois uma seção separada para sobrescritas e casos avançados.
 
@@ -48,6 +51,13 @@ Arquivos de controle principais:
 - `configs/speecht5_minimal.yaml`
 - `artifacts/run_matrix.csv`
 - `artifacts/evaluation/samples.csv`
+
+Contrato atual desses arquivos:
+
+- `run_matrix.csv` é o plano experimental base
+- `samples.csv` é um ledger apenas de execuções materializadas
+- não existem mais linhas base em `samples.csv`
+- cada linha de `samples.csv` já nasce com `checkpoint_run_ts` e `checkpoint_step`
 
 Convencao da interface CLI:
 
@@ -185,13 +195,37 @@ Inicialize o ledger `samples.csv`:
 python3 scripts/init_samples.py
 ```
 
-Execute o pipeline LoRA e materialize checkpoints:
+Esse comando cria apenas o schema do ledger. O arquivo nasce vazio por design.
+
+Treine as condicionais `LoRA`:
 
 ```bash
 python3 scripts/run_speecht5_lora.py
 ```
 
-Sem `--condition`, o comando percorre todas as condicionais LoRA do YAML em sequência.
+Sem `--condition`, o comando percorre todas as condicionais LoRA do YAML em sequência. O script agora é treino-only por padrão.
+
+Materialize no `samples.csv` apenas o checkpoint padrão de cada unidade de treino:
+
+```bash
+python3 scripts/materialize_speecht5_samples.py --config configs/speecht5_minimal.yaml
+```
+
+Regra padrão:
+
+- `training.scope=per_speaker`: melhor checkpoint por speaker
+- `training.scope=unique`: melhor checkpoint da unidade `unique`, compartilhado pelos speakers materializados
+
+Gere os audios materializados com suporte a resume:
+
+```bash
+python3 scripts/run_speecht5_inference.py \
+  --config configs/speecht5_minimal.yaml \
+  --condition speecht5_lora_conservative \
+  --condition speecht5_lora_unique
+```
+
+Antes de sintetizar, a inferência reconcilia WAVs já existentes no `samples.csv`. Se o job anterior foi interrompido, os audios já gravados são reaproveitados e só as linhas pendentes continuam.
 
 Transcreva os audios gerados com Whisper:
 
@@ -318,10 +352,84 @@ Impacto esperado:
 - `--condition` reduz o escopo do treino sem editar o YAML
 - `--gpu-hourly-rate` só afeta a execução corrente; o valor estrutural continua no bloco `training` de cada condicional
 
+Retome um treino interrompido dentro do mesmo `checkpoint_run_ts`:
+
+```bash
+python3 scripts/run_speecht5_lora.py \
+  --condition speecht5_lora_conservative \
+  --resume-train \
+  --checkpoint-run-ts 20260429T010203Z
+```
+
+Regras importantes:
+
+- o resume reutiliza `optimizer`, `scheduler`, `scaler` e `global_step` do último `checkpoint-*` salvo
+- se a unidade de treino já tiver `adapter_model.safetensors`, ela não é refeita
+- em `training.scope=unique`, filtros `--speaker-id` para treino são inválidos e falham com erro explícito
+
+Selecione speakers específicos apenas no modo `per_speaker`:
+
+```bash
+python3 scripts/run_speecht5_lora.py \
+  --condition speecht5_lora_conservative \
+  --speaker-id speaker_01 \
+  --speaker-id speaker_02
+```
+
 Se ocorrer `CUDA out of memory` em `RTX 4090 24 GB`, o primeiro ajuste recomendado é:
 
 - reduzir `per_device_train_batch_size` para `1`
 - aumentar `gradient_accumulation_steps` para `4`
+
+O runtime sempre prioriza:
+
+- `CUDA`
+- `MPS` no macOS quando `CUDA` não existir
+- `CPU` apenas como fallback
+
+Esse resolvedor central é reaproveitado em treino, inferência, Whisper e métricas compatíveis.
+
+### Materializacao e inferencia
+
+Materialize todos os checkpoints de uma condicional:
+
+```bash
+python3 scripts/materialize_speecht5_samples.py \
+  --config configs/speecht5_minimal.yaml \
+  --condition speecht5_lora_conservative \
+  --all-checkpoints
+```
+
+Materialize um subconjunto específico:
+
+```bash
+python3 scripts/materialize_speecht5_samples.py \
+  --config configs/speecht5_minimal.yaml \
+  --condition speecht5_lora_conservative \
+  --checkpoint-step 500 \
+  --checkpoint-step 1000 \
+  --speaker-id speaker_01 \
+  --prompt-id P001
+```
+
+Regerar audio já existente:
+
+```bash
+python3 scripts/run_speecht5_inference.py \
+  --config configs/speecht5_minimal.yaml \
+  --condition speecht5_lora_conservative \
+  --force
+```
+
+Gerar só um subconjunto materializado:
+
+```bash
+python3 scripts/run_speecht5_inference.py \
+  --config configs/speecht5_minimal.yaml \
+  --condition speecht5_lora_unique \
+  --speaker-id speaker_01 \
+  --prompt-id P001
+```
 
 ### Metricas
 
@@ -353,6 +461,8 @@ Impacto esperado:
 
 - essas flags alteram a forma de avaliação, não a estrutura do experimento
 - se você mudar uma métrica ou modelo de avaliação, regenere os agregados e `report_assets/`
+- no fluxo canônico, as métricas refletem apenas as linhas já materializadas e com audio existente
+- por padrão, isso significa avaliar apenas o checkpoint padrão de cada unidade de treino
 
 ### Outputs e execucao in-place
 
@@ -424,7 +534,7 @@ python3 scripts/remove_speecht5_condition.py \
   --condition speecht5_lora_unique
 ```
 
-Esse fluxo encadeia o cleanup com `bypass` interno, remove as linhas base da condicional no `samples.csv`, remove a condicional do bloco `conditions:` do config e invalida `deliverables.run_matrix` quando o arquivo existir.
+Esse fluxo encadeia o cleanup com `bypass` interno, remove as linhas materializadas da condicional no `samples.csv`, remove a condicional do bloco `conditions:` do config e invalida `deliverables.run_matrix` quando o arquivo existir.
 
 ## Artefatos esperados
 

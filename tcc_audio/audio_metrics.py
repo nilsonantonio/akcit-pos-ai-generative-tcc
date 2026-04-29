@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 from tcc_audio.config import load_experiment_config, resolve_speaker_similarity_model
-from tcc_audio.runtime import load_samples, refresh_sample_status, save_samples, stringify_csv_value
+from tcc_audio.runtime import load_samples, metric_eligible_mask, refresh_sample_status, save_samples_atomic, stringify_csv_value
 from tcc_audio.speechbrain_compat import (
     encode_audio_path,
     load_encoder_classifier,
@@ -43,7 +43,7 @@ def compute_speaker_similarity(
         run_opts=resolve_speechbrain_run_opts(),
     )
     samples = load_samples(samples_path)
-    subset = samples[samples["audio_path"].astype(str).str.strip().ne("")]
+    subset = samples[metric_eligible_mask(samples)].copy()
 
     for _, row in subset.iterrows():
         sample_id = row["sample_id"]
@@ -60,7 +60,7 @@ def compute_speaker_similarity(
             samples.loc[samples["sample_id"].eq(sample_id), "failure_reason"] = str(exc)
 
     samples = refresh_sample_status(samples)
-    save_samples(samples, out_path)
+    save_samples_atomic(samples, out_path)
     return samples
 
 
@@ -145,11 +145,11 @@ def compute_nisqa(
     nisqa_root = _resolve_nisqa_root(nisqa_path=nisqa_path)
     pretrained_model = _resolve_nisqa_pretrained_model(nisqa_root)
     samples = load_samples(samples_path)
-    subset = samples[samples["audio_path"].astype(str).str.strip().ne("")]
+    subset = samples[metric_eligible_mask(samples)].copy()
     audio_paths = [path for path in subset["audio_path"].tolist() if Path(path).exists()]
     if not audio_paths:
         samples = refresh_sample_status(samples)
-        save_samples(samples, out_path)
+        save_samples_atomic(samples, out_path)
         return samples
 
     with tempfile.TemporaryDirectory(prefix="nisqa_predict_") as tmpdir:
@@ -184,14 +184,14 @@ def compute_nisqa(
         if score is not None:
             samples.loc[samples["sample_id"].eq(row["sample_id"]), "nisqa"] = stringify_csv_value(float(score))
     samples = refresh_sample_status(samples)
-    save_samples(samples, out_path)
+    save_samples_atomic(samples, out_path)
     return samples
 
 
 def compute_f0_rmse(samples_path: str | Path, out_path: str | Path, sample_rate: int = 16000) -> pd.DataFrame:
     librosa = _load_librosa()
     samples = load_samples(samples_path)
-    subset = samples[samples["audio_path"].astype(str).str.strip().ne("")]
+    subset = samples[metric_eligible_mask(samples)].copy()
 
     for _, row in subset.iterrows():
         audio_path = Path(row["audio_path"])
@@ -212,7 +212,7 @@ def compute_f0_rmse(samples_path: str | Path, out_path: str | Path, sample_rate:
             samples.loc[samples["sample_id"].eq(row["sample_id"]), "failure_reason"] = str(exc)
 
     samples = refresh_sample_status(samples)
-    save_samples(samples, out_path)
+    save_samples_atomic(samples, out_path)
     return samples
 
 
